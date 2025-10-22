@@ -81,12 +81,28 @@ void LinBusComponent::loop() {
   // Process LIN communication (master scheduling, statistics, etc.)
   this->lin_comm_->lin_process();
 
-  // Log statistics every 10 seconds
+  // Update sensors and log statistics every 10 seconds
   static uint32_t last_stats_log = 0;
   uint32_t now = millis();
   if (now - last_stats_log > 10000) {
     last_stats_log = now;
     const lin_statistics_t &stats = this->lin_comm_->getStatistics();
+
+    // Publish sensor values
+    if (this->master_requests_sensor_)
+      this->master_requests_sensor_->publish_state(stats.master_requests_sent);
+    if (this->id_requests_answered_sensor_)
+      this->id_requests_answered_sensor_->publish_state(stats.id_requests_answered);
+    if (this->data_bytes_received_sensor_)
+      this->data_bytes_received_sensor_->publish_state(stats.data_bytes_received);
+    if (this->checksum_errors_sensor_)
+      this->checksum_errors_sensor_->publish_state(stats.checksum_errors);
+    if (this->send_failures_sensor_)
+      this->send_failures_sensor_->publish_state(stats.master_send_failures);
+    if (this->bus_load_sensor_)
+      this->bus_load_sensor_->publish_state(stats.estimated_bus_load_percent);
+    if (this->error_rate_sensor_)
+      this->error_rate_sensor_->publish_state(stats.error_rate_percent);
 
     ESP_LOGI(TAG, "=== LIN Bus Statistics ===");
     ESP_LOGI(TAG, "Master Requests: %u", stats.master_requests_sent);
@@ -146,6 +162,27 @@ void LinBusComponent::add_schedule_item(uint8_t id, uint32_t interval_ms) {
 void LinBusComponent::add_response(uint8_t id, const std::vector<uint8_t> &data, bool enhanced) {
   // Store for later application in setup()
   this->pending_responses_.push_back({id, data, enhanced});
+}
+
+void LinBusComponent::update_response(uint8_t lin_id, const std::vector<uint8_t> &data) {
+  if (this->lin_comm_ == nullptr) {
+    ESP_LOGW(TAG, "Cannot update response: LIN communication not initialized");
+    return;
+  }
+
+  if (data.size() > 8) {
+    ESP_LOGW(TAG, "Cannot update response for ID 0x%02X: data too long (%zu bytes, max 8)", lin_id, data.size());
+    return;
+  }
+
+  // Update the response data
+  bool success = this->lin_comm_->set_response_data(lin_id, const_cast<uint8_t *>(data.data()), data.size());
+
+  if (success) {
+    ESP_LOGD(TAG, "Updated response for LIN ID 0x%02X with %zu bytes", lin_id, data.size());
+  } else {
+    ESP_LOGW(TAG, "Failed to update response for LIN ID 0x%02X", lin_id);
+  }
 }
 
 // Statistics getters

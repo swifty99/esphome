@@ -15,6 +15,7 @@ LinFrameTrigger = linbus_ns.class_(
     "LinFrameTrigger",
     automation.Trigger.template(cg.std_vector.template(cg.uint8), cg.uint8),
 )
+UpdateResponseAction = linbus_ns.class_("UpdateResponseAction", automation.Action)
 
 # Configuration constants
 CONF_CS_PIN = "cs_pin"
@@ -28,6 +29,7 @@ CONF_UART_PORT = "uart_port"
 CONF_TX_PIN = "tx_pin"
 CONF_RX_PIN = "rx_pin"
 CONF_ON_FRAME = "on_frame"
+CONF_LINBUS_ID = "linbus_id"
 
 # Mode constants
 MODE_MASTER = "master"
@@ -132,3 +134,37 @@ async def to_code(config):
             [(cg.std_vector.template(cg.uint8), "data"), (cg.uint8, "data_length")],
             conf,
         )
+
+
+# Action: update_response
+@automation.register_action(
+    "linbus.update_response",
+    UpdateResponseAction,
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.use_id(LinBusComponent),
+            cv.Required(CONF_LIN_ID): cv.templatable(cv.int_range(min=0, max=63)),
+            cv.Required(CONF_DATA): cv.templatable(
+                cv.All([cv.hex_uint8_t], cv.Length(min=0, max=8))
+            ),
+        }
+    ),
+)
+async def update_response_to_code(config, action_id, template_arg, args):
+    """Generate code for update_response action."""
+    parent = await cg.get_variable(config[CONF_ID])
+    var = cg.new_Pvariable(action_id, template_arg, parent)
+
+    # Handle templatable lin_id
+    template_ = await cg.templatable(config[CONF_LIN_ID], args, cg.uint8)
+    cg.add(var.set_lin_id(template_))
+
+    # Handle templatable or static data
+    data = config[CONF_DATA]
+    if cg.is_template(data):
+        template_ = await cg.templatable(data, args, cg.std_vector.template(cg.uint8))
+        cg.add(var.set_data_template(template_))
+    else:
+        cg.add(var.set_data_static(data))
+
+    return var

@@ -1,0 +1,71 @@
+esphome:
+  name: linbus-test-actions
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+linbus:
+  id: lin_slave
+  tx_pin: GPIO10
+  rx_pin: GPIO6
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: slave
+  responses:
+    - lin_id: 52  # Initial response
+      data: [0x00, 0x00, 0x00, 0x00]
+      checksum: enhanced
+    - lin_id: 53  # Another response
+      data: [0xFF, 0xFF, 0xFF, 0xFF]
+      checksum: enhanced
+  on_frame:
+    - lin_id: 52
+      then:
+        - logger.log:
+            format: "Received frame for ID 52: [%02X, %02X, %02X, %02X]"
+            args:
+              - data[0]
+              - data[1]
+              - data[2]
+              - data[3]
+        # Update response with incremented values
+        - linbus.update_response:
+            lin_id: 52
+            data: !lambda |-
+              std::vector<uint8_t> new_data;
+              for (size_t i = 0; i < data.size(); i++) {
+                new_data.push_back(data[i] + 1);
+              }
+              return new_data;
+
+# Example: Use a button to manually update response
+button:
+  - platform: template
+    name: "Reset LIN Response"
+    on_press:
+      - linbus.update_response:
+          lin_id: 52
+          data: [0x00, 0x00, 0x00, 0x00]
+      - logger.log: "LIN response reset to zeros"
+
+  - platform: template
+    name: "Set Test Pattern"
+    on_press:
+      - linbus.update_response:
+          lin_id: 53
+          data: [0xAA, 0x55, 0xAA, 0x55]
+      - logger.log: "LIN response set to test pattern"
+
+sensor:
+  - platform: linbus
+    linbus_id: lin_slave
+    master_requests:
+      name: "LIN Master Requests"
+    data_bytes_received:
+      name: "LIN Data Bytes Received"

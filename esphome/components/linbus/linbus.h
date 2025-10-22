@@ -3,6 +3,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/automation.h"
+#include "esphome/components/sensor/sensor.h"
 #include "LINCommunication.h"
 #include <vector>
 #include <string>
@@ -25,6 +26,35 @@ class LinFrameTrigger : public Trigger<std::vector<uint8_t>, uint8_t> {
  protected:
   LinBusComponent *parent_;
   uint8_t lin_id_;
+};
+
+// Action to update LIN response data
+template<typename... Ts> class UpdateResponseAction : public Action<Ts...> {
+ public:
+  UpdateResponseAction(LinBusComponent *parent) : parent_(parent) {}
+
+  TEMPLATABLE_VALUE(uint8_t, lin_id)
+
+  void set_data_template(std::function<std::vector<uint8_t>(Ts...)> func) { this->data_func_ = func; }
+  void set_data_static(const std::vector<uint8_t> &data) { this->data_static_ = data; }
+
+  void play(Ts... x) override {
+    auto lin_id = this->lin_id_.value(x...);
+    std::vector<uint8_t> data;
+
+    if (this->data_func_.has_value()) {
+      data = this->data_func_.value()(x...);
+    } else {
+      data = this->data_static_;
+    }
+
+    this->parent_->update_response(lin_id, data);
+  }
+
+ protected:
+  LinBusComponent *parent_;
+  optional<std::function<std::vector<uint8_t>(Ts...)>> data_func_;
+  std::vector<uint8_t> data_static_;
 };
 
 class LinBusComponent : public Component {
@@ -51,6 +81,9 @@ class LinBusComponent : public Component {
   // Register on_frame trigger
   void register_frame_trigger(LinFrameTrigger *trigger) { frame_triggers_.push_back(trigger); }
 
+  // Actions
+  void update_response(uint8_t lin_id, const std::vector<uint8_t> &data);
+
   // Statistics getters
   uint32_t get_master_requests_sent() const;
   uint32_t get_id_requests_answered() const;
@@ -59,6 +92,15 @@ class LinBusComponent : public Component {
   uint32_t get_master_send_failures() const;
   float get_bus_load_percent() const;
   float get_error_rate_percent() const;
+
+  // Sensor registration
+  void set_master_requests_sensor(sensor::Sensor *sensor) { master_requests_sensor_ = sensor; }
+  void set_id_requests_answered_sensor(sensor::Sensor *sensor) { id_requests_answered_sensor_ = sensor; }
+  void set_data_bytes_received_sensor(sensor::Sensor *sensor) { data_bytes_received_sensor_ = sensor; }
+  void set_checksum_errors_sensor(sensor::Sensor *sensor) { checksum_errors_sensor_ = sensor; }
+  void set_send_failures_sensor(sensor::Sensor *sensor) { send_failures_sensor_ = sensor; }
+  void set_bus_load_sensor(sensor::Sensor *sensor) { bus_load_sensor_ = sensor; }
+  void set_error_rate_sensor(sensor::Sensor *sensor) { error_rate_sensor_ = sensor; }
 
  protected:
   GPIOPin *tx_pin_{nullptr};
@@ -88,6 +130,15 @@ class LinBusComponent : public Component {
 
   // Track last seen update count for each LIN ID to detect new frames
   std::unordered_map<uint8_t, uint32_t> last_update_counts_;
+
+  // Sensors for statistics
+  sensor::Sensor *master_requests_sensor_{nullptr};
+  sensor::Sensor *id_requests_answered_sensor_{nullptr};
+  sensor::Sensor *data_bytes_received_sensor_{nullptr};
+  sensor::Sensor *checksum_errors_sensor_{nullptr};
+  sensor::Sensor *send_failures_sensor_{nullptr};
+  sensor::Sensor *bus_load_sensor_{nullptr};
+  sensor::Sensor *error_rate_sensor_{nullptr};
 };
 
 }  // namespace linbus
