@@ -1,0 +1,26 @@
+esphome:
+  name: linbus-test-slave
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+linbus:
+  id: lin_slave
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  cs_pin: GPIO5
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: slave
+  responses:
+    - lin_id: 34
+      data: [0x01, 0x02, 0x03, 0x04]
+      checksum: enhanced
+    - lin_id: 24
+      data: [0xAA, 0xBB]
+      checksum: enhanced

@@ -1,0 +1,28 @@
+esphome:
+  name: linbus-test-esp32c3
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  # ESP32-C3 defaults to USB_SERIAL_JTAG for logging (the USB connection)
+  # We use UART1 for LIN bus, so USB logging is perfect
+
+linbus:
+  id: lin_master
+  tx_pin: GPIO10
+  rx_pin: GPIO6
+  cs_pin: GPIO7
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: master
+  schedule:
+    - lin_id: 52  # 0x34 (PID_CURRENT from your code)
+      interval: 10ms
+  responses:
+    - lin_id: 52
+      data: [0x00, 0x80, 0x01]
+      checksum: enhanced

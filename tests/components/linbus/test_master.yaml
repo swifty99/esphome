@@ -1,0 +1,28 @@
+esphome:
+  name: linbus-test-master
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+linbus:
+  id: lin_master
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  cs_pin: GPIO5
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: master
+  schedule:
+    - lin_id: 34
+      interval: 100ms
+    - lin_id: 24
+      interval: 50ms
+  responses:
+    - lin_id: 48
+      data: [0x00, 0x00, 0x00, 0x00]
+      checksum: enhanced
