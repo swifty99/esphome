@@ -1,6 +1,7 @@
 substitutions:
   pin1: GPIO3
   pin2: GPIO4
+  pin3: GPIO5
 
 # WARNING: Using !extend or !remove prevents automatic component grouping in CI, making builds slower.
 light:

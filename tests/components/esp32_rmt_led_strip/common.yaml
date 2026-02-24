@@ -14,3 +14,10 @@ light:
     bit0_low: 100us
     bit1_high: 100us
     bit1_low: 100us
+  - platform: esp32_rmt_led_strip
+    id: led_strip3_16bit
+    pin: ${pin3}
+    num_leds: 30
+    rgb_order: GRB
+    chipset: ws2812
+    high_precision: true

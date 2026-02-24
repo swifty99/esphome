@@ -1,0 +1,24 @@
+---
+esphome:
+  name: test-16bit
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: led_strip_16bit
+    pin: GPIO13
+    num_leds: 60
+    rgb_order: GRB
+    chipset: ws2812
+    high_precision: true
+  - platform: esp32_rmt_led_strip
+    id: led_strip_normal
+    pin: GPIO14
+    num_leds: 60
+    rgb_order: GRB
+    chipset: ws2812
+    high_precision: false

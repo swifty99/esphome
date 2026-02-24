@@ -31,6 +31,10 @@ ESP32RMTLEDStripLightOutput = esp32_rmt_led_strip_ns.class_(
     "ESP32RMTLEDStripLightOutput", light.AddressableLight
 )
 
+ESP32RMTLEDStripLightOutput16 = esp32_rmt_led_strip_ns.class_(
+    "ESP32RMTLEDStripLightOutput16", ESP32RMTLEDStripLightOutput
+)
+
 RGBOrder = esp32_rmt_led_strip_ns.enum("RGBOrder")
 
 RGB_ORDERS = {
@@ -68,6 +72,7 @@ CONF_BIT1_HIGH = "bit1_high"
 CONF_BIT1_LOW = "bit1_low"
 CONF_RESET_HIGH = "reset_high"
 CONF_RESET_LOW = "reset_low"
+CONF_HIGH_PRECISION = "high_precision"
 
 
 CONFIG_SCHEMA = cv.All(
@@ -127,6 +132,7 @@ CONFIG_SCHEMA = cv.All(
                 CONF_RESET_LOW,
                 default="0 us",
             ): cv.positive_time_period_nanoseconds,
+            cv.Optional(CONF_HIGH_PRECISION, default=False): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.has_exactly_one_key(CONF_CHIPSET, CONF_BIT0_HIGH),
@@ -137,6 +143,8 @@ async def to_code(config):
     # Re-enable ESP-IDF's RMT driver (excluded by default to save compile time)
     include_builtin_idf_component("esp_driver_rmt")
 
+    if config[CONF_HIGH_PRECISION]:
+        config[CONF_OUTPUT_ID].type = ESP32RMTLEDStripLightOutput16
     var = cg.new_Pvariable(config[CONF_OUTPUT_ID])
     await light.register_light(var, config)
     await cg.register_component(var, config)
