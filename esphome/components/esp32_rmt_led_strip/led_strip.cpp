@@ -178,7 +178,7 @@ void ESP32RMTLEDStripLightOutput::write_state(light::LightState *state) {
     this->status_set_warning();
     return;
   }
-  delayMicroseconds(50);
+  delayMicroseconds(this->latch_delay_us_);
 
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 3, 0)
   memcpy(this->rmt_buf_, this->buf_, this->get_buffer_size_());
@@ -300,8 +300,9 @@ void ESP32RMTLEDStripLightOutput::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "  RGB Order: %s\n"
                 "  Max refresh rate: %" PRIu32 "\n"
+                "  Latch delay: %" PRIu32 " µs\n"
                 "  Number of LEDs: %u",
-                rgb_order, *this->max_refresh_rate_, this->num_leds_);
+                rgb_order, *this->max_refresh_rate_, this->latch_delay_us_, this->num_leds_);
 }
 
 float ESP32RMTLEDStripLightOutput::get_setup_priority() const { return setup_priority::HARDWARE; }

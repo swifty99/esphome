@@ -106,6 +106,11 @@ void ESP32RMTLEDStripLightOutput16::dither_loop_() {
     if (xSemaphoreTake(this->tx_done_sem_, pdMS_TO_TICKS(1000)) != pdTRUE) {
       ESP_LOGW(TAG, "RMT TX done timeout");
     }
+
+    // Ensure minimum latch delay after TX done before next frame
+    if (this->latch_delay_us_ > 0) {
+      delayMicroseconds(this->latch_delay_us_);
+    }
   }
 
   // Clean exit

@@ -73,6 +73,7 @@ CONF_BIT1_LOW = "bit1_low"
 CONF_RESET_HIGH = "reset_high"
 CONF_RESET_LOW = "reset_low"
 CONF_HIGH_PRECISION = "high_precision"
+CONF_LATCH_DELAY = "latch_delay"
 
 
 CONFIG_SCHEMA = cv.All(
@@ -133,6 +134,10 @@ CONFIG_SCHEMA = cv.All(
                 default="0 us",
             ): cv.positive_time_period_nanoseconds,
             cv.Optional(CONF_HIGH_PRECISION, default=False): cv.boolean,
+            cv.Optional(
+                CONF_LATCH_DELAY,
+                default="50 us",
+            ): cv.positive_time_period_microseconds,
         }
     ).extend(cv.COMPONENT_SCHEMA),
     cv.has_exactly_one_key(CONF_CHIPSET, CONF_BIT0_HIGH),
@@ -188,3 +193,5 @@ async def to_code(config):
     cg.add(var.set_rmt_symbols(config[CONF_RMT_SYMBOLS]))
     if CONF_USE_DMA in config:
         cg.add(var.set_use_dma(config[CONF_USE_DMA]))
+
+    cg.add(var.set_latch_delay_us(config[CONF_LATCH_DELAY]))

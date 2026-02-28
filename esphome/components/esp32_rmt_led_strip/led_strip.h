@@ -59,6 +59,9 @@ class ESP32RMTLEDStripLightOutput : public light::AddressableLight {
   /// Set a maximum refresh rate in µs as some lights do not like being updated too often.
   void set_max_refresh_rate(uint32_t interval_us) { this->max_refresh_rate_ = interval_us; }
 
+  /// Set the minimum latch/reset delay in µs between consecutive transmissions.
+  void set_latch_delay_us(uint32_t delay_us) { this->latch_delay_us_ = delay_us; }
+
   void set_led_params(uint32_t bit0_high, uint32_t bit0_low, uint32_t bit1_high, uint32_t bit1_low,
                       uint32_t reset_time_high, uint32_t reset_time_low);
 
@@ -99,6 +102,7 @@ class ESP32RMTLEDStripLightOutput : public light::AddressableLight {
   RGBOrder rgb_order_{ORDER_RGB};
 
   uint32_t last_refresh_{0};
+  uint32_t latch_delay_us_{50};
   optional<uint32_t> max_refresh_rate_{};
 };
 
