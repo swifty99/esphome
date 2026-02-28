@@ -187,7 +187,11 @@ void ESP32RMTLEDStripLightOutput16::setup() {
     return;
   }
 
-  // Register RMT TX done callback (ISR)
+  // Register RMT TX done callback (ISR).
+  // ESP-IDF requires callbacks to be registered before rmt_enable(),
+  // but the parent setup() already called rmt_enable(). Disable first.
+  rmt_disable(this->channel_);
+
   rmt_tx_event_callbacks_t cbs;
   memset(&cbs, 0, sizeof(cbs));
   cbs.on_trans_done = on_trans_done_;
@@ -197,6 +201,8 @@ void ESP32RMTLEDStripLightOutput16::setup() {
     this->mark_failed();
     return;
   }
+
+  rmt_enable(this->channel_);
 
   // Create dither task — priority 1 above the main ESPHome loop task
   this->dither_task_running_ = true;
