@@ -22,10 +22,10 @@ namespace esp32_rmt_led_strip {
 ///
 /// Temporal dithering (Phase 2):
 ///   A background FreeRTOS task continuously refreshes the strip at maximum rate.
-///   Each frame, a 2×2 ordered Bayer matrix selects between adjacent 8-bit output
+///   Each frame, a 4×4 ordered Bayer matrix selects between adjacent 8-bit output
 ///   levels based on the fractional part of the 16-bit gamma-corrected value.
-///   This gives 4 perceptual sub-levels per 8-bit step without error accumulation
-///   or low-frequency flicker (cycle = 2 frames → ≥50 Hz at any practical strip length).
+///   This gives 16 perceptual sub-levels per 8-bit step without error accumulation
+///   or low-frequency flicker (cycle = 4 frames → ≥25 Hz at any practical strip length).
 ///
 ///   write_state() is non-blocking: it updates buf_16_[] and signals the dither task.
 ///   The ISR on RMT TX done wakes the task for the next frame.
@@ -45,7 +45,7 @@ class ESP32RMTLEDStripLightOutput16 : public ESP32RMTLEDStripLightOutput {
   /// The actual dither loop running in task context
   void dither_loop_();
 
-  /// Apply 2×2 Bayer dithering from buf_16_[] → rmt_buf (one frame)
+  /// Apply 4×4 Bayer dithering from buf_16_[] → rmt_buf (one frame)
   void dither_frame_(uint8_t *rmt_buf, uint8_t frame_index);
 
   /// Check if all 16-bit values have zero fractional part (no dithering needed)

@@ -18,16 +18,16 @@ namespace esp32_rmt_led_strip {
 
 static const char *const TAG = "esp32_rmt_led_strip.16bit";
 
-// 2×2 ordered Bayer matrix, scaled to 0..255 range.
-// Temporal index = frame_counter & 1  (2 rows → cycle every 2 frames)
-// Spatial index  = (led_byte_index / bytes_per_led) & 1
-// Threshold layout:
-//   [ 0, 128 ]    →  frame 0: even LEDs threshold=0,   odd LEDs threshold=128
-//   [ 192, 64 ]   →  frame 1: even LEDs threshold=192, odd LEDs threshold=64
-// This gives 4 perceptual sub-levels between adjacent 8-bit values.
-static const uint8_t BAYER2X2[2][2] = {
-    {0, 128},
-    {192, 64},
+// 4×4 ordered Bayer matrix, scaled to 0..255 range (Fadecandy-style).
+// Temporal index = frame_counter & 3  (4 rows → cycle every 4 frames)
+// Spatial index  = (led_byte_index / bytes_per_led) & 3
+// 16 unique thresholds evenly spaced by 16 (256/16), giving
+// 16 perceptual sub-levels between adjacent 8-bit values.
+static const uint8_t BAYER4X4[4][4] = {
+    {0, 128, 32, 160},
+    {192, 64, 224, 96},
+    {48, 176, 16, 144},
+    {240, 112, 208, 80},
 };
 
 // ─── ISR callback (IRAM) ───────────────────────────────────────────────
@@ -114,7 +114,7 @@ void ESP32RMTLEDStripLightOutput16::dither_loop_() {
 
 void ESP32RMTLEDStripLightOutput16::dither_frame_(uint8_t *rmt_buf, uint8_t frame_index) {
   size_t buffer_size = this->get_buffer_size_();
-  uint8_t temporal_idx = frame_index & 1;
+  uint8_t temporal_idx = frame_index & 3;
   size_t bytes_per_led = (this->is_rgbw_ || this->is_wrgb_) ? 4 : 3;
 
   for (size_t i = 0; i < buffer_size; i++) {
@@ -123,9 +123,9 @@ void ESP32RMTLEDStripLightOutput16::dither_frame_(uint8_t *rmt_buf, uint8_t fram
     uint8_t frac = static_cast<uint8_t>(val16 & 0xFF);
 
     // Spatial index: which LED this byte belongs to
-    uint8_t spatial_idx = (i / bytes_per_led) & 1;
+    uint8_t spatial_idx = (i / bytes_per_led) & 3;
 
-    uint8_t threshold = BAYER2X2[temporal_idx][spatial_idx];
+    uint8_t threshold = BAYER4X4[temporal_idx][spatial_idx];
 
     // If fractional part exceeds the Bayer threshold, round up
     if (frac > threshold && high < 255) {
@@ -280,7 +280,7 @@ void ESP32RMTLEDStripLightOutput16::dump_config() {
   ESP32RMTLEDStripLightOutput::dump_config();
   ESP_LOGCONFIG(TAG, "  High Precision: 16-bit with temporal dithering");
   ESP_LOGCONFIG(TAG, "  Gamma (16-bit LUT): %.2f", this->gamma_correct_value_);
-  ESP_LOGCONFIG(TAG, "  Dither matrix: 2x2 Bayer (4 sub-levels, 2-frame cycle)");
+  ESP_LOGCONFIG(TAG, "  Dither matrix: 4x4 Bayer (16 sub-levels, 4-frame cycle)");
 }
 
 }  // namespace esp32_rmt_led_strip
