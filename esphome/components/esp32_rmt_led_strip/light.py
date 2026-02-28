@@ -74,6 +74,7 @@ CONF_RESET_HIGH = "reset_high"
 CONF_RESET_LOW = "reset_low"
 CONF_HIGH_PRECISION = "high_precision"
 CONF_LATCH_DELAY = "latch_delay"
+CONF_MIN_FLICKER_HZ = "min_flicker_hz"
 
 
 CONFIG_SCHEMA = cv.All(
@@ -134,6 +135,7 @@ CONFIG_SCHEMA = cv.All(
                 default="0 us",
             ): cv.positive_time_period_nanoseconds,
             cv.Optional(CONF_HIGH_PRECISION, default=False): cv.boolean,
+            cv.Optional(CONF_MIN_FLICKER_HZ, default=50): cv.int_range(min=0, max=500),
             cv.Optional(
                 CONF_LATCH_DELAY,
                 default="50 us",
@@ -195,3 +197,6 @@ async def to_code(config):
         cg.add(var.set_use_dma(config[CONF_USE_DMA]))
 
     cg.add(var.set_latch_delay_us(config[CONF_LATCH_DELAY]))
+
+    if config[CONF_HIGH_PRECISION]:
+        cg.add(var.set_min_flicker_hz(config[CONF_MIN_FLICKER_HZ]))
