@@ -5,109 +5,13 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from typing import Any
+import sys
 
 from esphome.const import CONF_COMPILE_PROCESS_LIMIT, CONF_ESPHOME, KEY_CORE
 from esphome.core import CORE, EsphomeError
-from esphome.util import run_external_command, run_external_process
+from esphome.util import run_external_process
 
 _LOGGER = logging.getLogger(__name__)
-
-
-def patch_structhash():
-    # Patch platformio's structhash to not recompile the entire project when files are
-    # removed/added. This might have unintended consequences, but this improves compile
-    # times greatly when adding/removing components and a simple clean build solves
-    # all issues
-    from platformio.run import cli, helpers
-
-    def patched_clean_build_dir(build_dir, *args):
-        from platformio import fs
-        from platformio.project.helpers import get_project_dir
-
-        platformio_ini = Path(get_project_dir()) / "platformio.ini"
-
-        build_dir = Path(build_dir)
-
-        # if project's config is modified
-        if (
-            build_dir.is_dir()
-            and platformio_ini.stat().st_mtime > build_dir.stat().st_mtime
-        ):
-            fs.rmtree(build_dir)
-
-        if not build_dir.is_dir():
-            build_dir.mkdir(parents=True)
-
-    helpers.clean_build_dir = patched_clean_build_dir
-    cli.clean_build_dir = patched_clean_build_dir
-
-
-def patch_file_downloader():
-    """Patch PlatformIO's FileDownloader to retry on PackageException errors."""
-    from platformio.package.download import FileDownloader
-    from platformio.package.exception import PackageException
-
-    original_init = FileDownloader.__init__
-
-    def patched_init(self, *args: Any, **kwargs: Any) -> None:
-        max_retries = 3
-
-        for attempt in range(max_retries):
-            try:
-                return original_init(self, *args, **kwargs)
-            except PackageException as e:
-                if attempt < max_retries - 1:
-                    _LOGGER.warning(
-                        "Package download failed: %s. Retrying... (attempt %d/%d)",
-                        str(e),
-                        attempt + 1,
-                        max_retries,
-                    )
-                else:
-                    # Final attempt - re-raise
-                    raise
-        return None
-
-    FileDownloader.__init__ = patched_init
-
-
-IGNORE_LIB_WARNINGS = f"(?:{'|'.join(['Hash', 'Update'])})"
-FILTER_PLATFORMIO_LINES = [
-    r"Verbose mode can be enabled via `-v, --verbose` option.*",
-    r"CONFIGURATION: https://docs.platformio.org/.*",
-    r"DEBUG: Current.*",
-    r"LDF Modes:.*",
-    r"LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf.*",
-    f"Looking for {IGNORE_LIB_WARNINGS} library in registry",
-    f"Warning! Library `.*'{IGNORE_LIB_WARNINGS}.*` has not been found in PlatformIO Registry.",
-    f"You can ignore this message, if `.*{IGNORE_LIB_WARNINGS}.*` is a built-in library.*",
-    r"Scanning dependencies...",
-    r"Found \d+ compatible libraries",
-    r"Memory Usage -> https://bit.ly/pio-memory-usage",
-    r"Found: https://platformio.org/lib/show/.*",
-    r"Using cache: .*",
-    r"Installing dependencies",
-    r"Library Manager: Already installed, built-in library",
-    r"Building in .* mode",
-    r"Advanced Memory Usage is available via .*",
-    r"Merged .* ELF section",
-    r"esptool.py v.*",
-    r"esptool v.*",
-    r"Checking size .*",
-    r"Retrieving maximum program size .*",
-    r"PLATFORM: .*",
-    r"PACKAGES:.*",
-    r" - framework-arduinoespressif.* \(.*\)",
-    r" - tool-esptool.* \(.*\)",
-    r" - toolchain-.* \(.*\)",
-    r"Creating BIN file .*",
-    r"Warning! Could not find file \".*.crt\"",
-    r"Warning! Arduino framework as an ESP-IDF component doesn't handle the `variant` field! The default `esp32` variant will be used.",
-    r"Warning: DEPRECATED: 'esptool.py' is deprecated. Please use 'esptool' instead. The '.py' suffix will be removed in a future major release.",
-    r"Warning: esp-idf-size exited with code 2",
-    r"esp_idf_size: error: unrecognized arguments: --ng",
-]
 
 
 def run_platformio_cli(*args, **kwargs) -> str | int:
@@ -118,19 +22,11 @@ def run_platformio_cli(*args, **kwargs) -> str | int:
     )
     # Suppress Python syntax warnings from third-party scripts during compilation
     os.environ.setdefault("PYTHONWARNINGS", "ignore::SyntaxWarning")
-    cmd = ["platformio"] + list(args)
+    # Increase uv retry count to handle transient network errors (default is 3)
+    os.environ.setdefault("UV_HTTP_RETRIES", "10")
+    cmd = [sys.executable, "-m", "esphome.platformio_runner"] + list(args)
 
-    if not CORE.verbose:
-        kwargs["filter_lines"] = FILTER_PLATFORMIO_LINES
-
-    if os.environ.get("ESPHOME_USE_SUBPROCESS") is not None:
-        return run_external_process(*cmd, **kwargs)
-
-    import platformio.__main__
-
-    patch_structhash()
-    patch_file_downloader()
-    return run_external_command(platformio.__main__.main, *cmd, **kwargs)
+    return run_external_process(*cmd, **kwargs)
 
 
 def run_platformio_cli_run(config, verbose, *args, **kwargs) -> str | int:
@@ -281,6 +177,8 @@ STACKTRACE_ESP32_BACKTRACE_RE = re.compile(
     r"Backtrace:(?:\s*0x[0-9a-fA-F]{8}:0x[0-9a-fA-F]{8})+"
 )
 STACKTRACE_ESP32_BACKTRACE_PC_RE = re.compile(r"4[0-9a-f]{7}")
+# ESP32 crash handler (stored backtrace from previous boot)
+STACKTRACE_ESP32_CRASH_BT_RE = re.compile(r"BT\d+:\s*0x([0-9a-fA-F]{8})")
 STACKTRACE_ESP8266_BACKTRACE_PC_RE = re.compile(r"4[0-9a-f]{7}")
 
 
@@ -310,6 +208,11 @@ def process_stacktrace(config, line, backtrace_state):
         _LOGGER.warning(
             "Memory allocation of %s bytes failed at %s", match.group(2), match.group(1)
         )
+        _decode_pc(config, match.group(1))
+
+    # ESP32 crash handler backtrace (from previous boot)
+    match = re.search(STACKTRACE_ESP32_CRASH_BT_RE, line)
+    if match is not None:
         _decode_pc(config, match.group(1))
 
     # ESP32 single-line backtrace
@@ -374,3 +277,28 @@ class IDEData:
             return f"{self.cc_path[:-7]}addr2line.exe"
 
         return f"{self.cc_path[:-3]}addr2line"
+
+    @property
+    def objdump_path(self) -> str:
+        # replace gcc at end with objdump
+        path = self.cc_path
+        return (
+            f"{path[:-7]}objdump.exe"
+            if path.endswith(".exe")
+            else f"{path[:-3]}objdump"
+        )
+
+    @property
+    def readelf_path(self) -> str:
+        # replace gcc at end with readelf
+        path = self.cc_path
+        return (
+            f"{path[:-7]}readelf.exe"
+            if path.endswith(".exe")
+            else f"{path[:-3]}readelf"
+        )
+
+    @property
+    def defines(self) -> list[str]:
+        """Return the list of preprocessor defines from idedata."""
+        return self.raw.get("defines", [])
