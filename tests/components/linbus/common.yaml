@@ -1,0 +1,103 @@
+linbus:
+  id: lin_master
+  tx_pin: ${tx_pin}
+  rx_pin: ${rx_pin}
+  cs_pin: ${cs_pin}
+  baud_rate: 19200
+  uart_port: UART_NUM_1
+  mode: master
+  self_test: true
+  schedule:
+    - lin_id: 34
+      interval: 100ms
+    - lin_id: 24
+      interval: 50ms
+      length: 4
+  responses:
+    - lin_id: 48
+      data: [0x00, 0x00, 0x00, 0x00]
+      checksum: enhanced
+    - lin_id: 49
+      data: [0x01, 0x02]
+      checksum: classic
+  rx_ids:
+    - lin_id: 16
+      length: 2
+      checksum: classic
+    - lin_id: 35
+      length: 4
+    - lin_id: 53
+      checksum: enhanced
+  on_frame:
+    - lin_id: 34
+      then:
+        - lambda: |-
+            ESP_LOGD("linbus", "Got %d bytes for id 34", data_length);
+    - lin_id: 16
+      length: 2
+      checksum: classic
+      then:
+        - logger.log:
+            format: "sniffed 16: %02X %02X"
+            args:
+              - data[0]
+              - data[1]
+  on_error:
+    - then:
+        - logger.log:
+            format: "LIN fault: %s"
+            args: ["x.c_str()"]
+
+button:
+  - platform: template
+    name: LIN Actions
+    on_press:
+      - linbus.update_response:
+          lin_id: 48
+          data: [0xAA, 0x55, 0xAA, 0x55]
+      - linbus.update_response:
+          lin_id: 48
+          data: !lambda |-
+            return std::vector<uint8_t>{0x01, 0x02, 0x03, 0x04};
+      - linbus.run_self_test:
+          enable: true
+      - linbus.run_self_test:
+          enable: false
+
+sensor:
+  - platform: linbus
+    linbus_id: lin_master
+    master_requests:
+      name: LIN Master Requests
+    id_requests_answered:
+      name: LIN ID Requests Answered
+    data_bytes_received:
+      name: LIN Data Bytes Received
+    frames_received:
+      name: LIN Frames RX
+    uart_breaks:
+      name: LIN UART Breaks
+    checksum_errors:
+      name: LIN Checksum Errors
+    checksum_fallback:
+      name: LIN Classic Fallback
+    pid_errors:
+      name: LIN PID Parity Errors
+    framing_errors:
+      name: LIN Framing Errors
+    collisions:
+      name: LIN Collisions
+    frames_coalesced:
+      name: LIN Frames Coalesced
+    send_failures:
+      name: LIN Send Failures
+    bus_load:
+      name: LIN Bus Load
+    error_rate:
+      name: LIN Error Rate
+
+binary_sensor:
+  - platform: linbus
+    linbus_id: lin_master
+    self_test_pass:
+      name: LIN Self-Test Pass
