@@ -92,13 +92,13 @@ struct IsoTpConfig {
 /// Decoded first-PCI-byte information. Which members are meaningful depends on `type`.
 struct PciInfo {
   PciType type{PciType::INVALID};
-  uint16_t length{0};             ///< SINGLE, FIRST: message length
-  uint8_t sequence{0};            ///< CONSECUTIVE: sequence number 0-15
+  uint16_t length{0};                       ///< SINGLE, FIRST: message length
+  uint8_t sequence{0};                      ///< CONSECUTIVE: sequence number 0-15
   FlowStatus status{FlowStatus::CONTINUE};  ///< FLOW_CONTROL
-  uint8_t block_size{0};          ///< FLOW_CONTROL
-  uint8_t st_min_raw{0};          ///< FLOW_CONTROL
-  uint8_t payload_offset{0};      ///< index of the first data byte within the frame
-  uint8_t payload_len{0};         ///< data bytes carried by this frame
+  uint8_t block_size{0};                    ///< FLOW_CONTROL
+  uint8_t st_min_raw{0};                    ///< FLOW_CONTROL
+  uint8_t payload_offset{0};                ///< index of the first data byte within the frame
+  uint8_t payload_len{0};                   ///< data bytes carried by this frame
 };
 
 // -------------------------------------------------------------------------------------------
@@ -476,10 +476,10 @@ class TxTransfer {
 // -------------------------------------------------------------------------------------------
 
 enum class RxAction : uint8_t {
-  NOTHING,           ///< nothing to do, or the frame was ignored
-  SEND_FLOW_CONTROL, ///< `out` holds a flow control frame to transmit
-  MESSAGE_COMPLETE,  ///< a full message is available via data()/size()
-  FAILED,            ///< see error()
+  NOTHING,            ///< nothing to do, or the frame was ignored
+  SEND_FLOW_CONTROL,  ///< `out` holds a flow control frame to transmit
+  MESSAGE_COMPLETE,   ///< a full message is available via data()/size()
+  FAILED,             ///< see error()
 };
 
 /// Reassembles one incoming message into a caller-supplied buffer.

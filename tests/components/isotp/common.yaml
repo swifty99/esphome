@@ -1,0 +1,86 @@
+# ISO-TP transport on a single can_gateway port: a diagnostic tester talking to
+# several ECUs at once. No routes, so the port is a pure observer that also sends.
+esphome:
+  on_boot:
+    then:
+      # Static payload: ReadDataByLocalIdentifier 0x01.
+      - isotp.send:
+          id: ecu_engine
+          data: [0x21, 0x01]
+      # Templatable payload.
+      - isotp.send:
+          id: ecu_body
+          data: !lambda "return {0x21, 0x02};"
+
+can_gateway:
+  id: diag
+  ports:
+    - id: diag_bus
+      rx_pin: GPIO3
+      tx_pin: GPIO2
+      bit_rate: 500kbps
+      # V5: must cover block_size (8) plus margin.
+      observe_queue_depth: 32
+
+isotp:
+  # 11-bit normal addressing, the Mercedes powertrain pair.
+  - id: ecu_engine
+    port_id: diag_bus
+    tx_id: 0x7E0
+    rx_id: 0x7E8
+    padding: 0xCC
+    on_message:
+      - logger.log:
+          format: "engine: %u bytes"
+          args: [x.size]
+      - lambda: |-
+          if (x.size >= 1 && x.data[0] == 0x61) {
+            ESP_LOGD("diag", "positive response");
+          }
+    on_error:
+      - logger.log:
+          format: "engine transport error %d"
+          args: ["(int) x"]
+
+  # Body ECU: identifiers are unrelated to the request id on Mercedes, no +8 rule.
+  - id: ecu_body
+    port_id: diag_bus
+    tx_id: 0x0400
+    rx_id: 0x0460
+    max_message_size: 512
+    block_size: 16
+    st_min: 40ms
+    n_cr_timeout: 2000ms
+
+  # 29-bit normal-fixed: identifiers derive from source/target (V3).
+  - id: ecu_fixed
+    port_id: diag_bus
+    addressing: normal_fixed
+    source: 0xF1
+    target: 0x01
+    st_min: 700us
+
+  # Extended addressing: the first payload byte carries the address.
+  - id: ecu_extended
+    port_id: diag_bus
+    addressing: extended
+    tx_id: 0x7E2
+    rx_id: 0x7EA
+    target_address: 0x13
+    max_message_size: 64
+
+sensor:
+  - platform: isotp
+    isotp_id: ecu_engine
+    messages_sent:
+      name: "Engine messages sent"
+    messages_received:
+      name: "Engine messages received"
+    transfers_failed:
+      name: "Engine transfers failed"
+    frames_ignored:
+      name: "Engine frames ignored"
+  - platform: isotp
+    isotp_id: ecu_body
+    transfers_failed:
+      name: "Body transfers failed"
