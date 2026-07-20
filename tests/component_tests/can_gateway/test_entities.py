@@ -44,6 +44,8 @@ def test_sensor_kind_order_locked() -> None:
         "tec",
         "rec",
         "bus_load",
+        "observed",
+        "observe_overflow",
     )
 
 

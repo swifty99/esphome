@@ -1,17 +1,27 @@
 esphome:
   on_boot:
     then:
-      # Static data -> flash-resident array, no RAM copy.
-      - can_gateway.inject:
+      # can_gateway.send (v0.6): static data -> flash-resident array, no RAM copy.
+      - can_gateway.send:
           port: port_a
           can_id: 0x100
           data: [0x01, 0x02, 0x03]
-      # Templated data -> generated function pointer path.
-      - can_gateway.inject:
+      # Templated data + templated can_id -> generated function pointer paths.
+      - can_gateway.send:
           port: port_a
-          can_id: 0x18DAF110
+          can_id: !lambda "return 0x18DAF110;"
           use_extended_id: true
           data: !lambda 'return {(uint8_t) (millis() & 0xFF), 0x02};'
+      # String payload shorthand, like canbus.send.
+      - can_gateway.send:
+          port: port_a
+          can_id: 0x101
+          data: "abc"
+      # can_gateway.inject remains a working alias for one release cycle.
+      - can_gateway.inject:
+          port: port_b
+          can_id: 0x102
+          data: [0x09]
       # Staged runtime patch update (S7): value + declared ID replacement.
       - can_gateway.set_patch:
           id: charge_limit
@@ -37,6 +47,10 @@ can_gateway:
       tx_pin: GPIO2
       bit_rate: 125kbps
       tx_queue_depth: 8
+      # v0.6 observation: this port both forwards (route_ab) and decodes
+      # signals off the same bus (S11).
+      observe_queue_depth: 48
+      max_frames_per_loop: 24
       on_bus_off:
         then:
           - lambda: 'ESP_LOGW("test", "port A bus-off");'
@@ -130,12 +144,46 @@ sensor:
       name: "A RX error counter"
     bus_load:
       name: "A bus load"
+    observed:
+      name: "A observed"
+    observe_overflow:
+      name: "A observe overflow"
+  # v0.6 signal decode (S9): numeric signals named by position in a message.
+  - platform: can_gateway
+    port_id: port_a
+    can_id: 0x2A0
+    offset: 2
+    length: 2
+    byte_order: big
+    name: "Engine RPM"
+    filters: [{multiply: 0.25}]
+  - platform: can_gateway
+    port_id: port_a
+    can_id: 0x2A0
+    bit_offset: 24
+    bit_length: 4
+    name: "Selected gear"
+    throttle: 200ms
+  - platform: can_gateway
+    port_id: port_a
+    can_id: 0x1B0
+    offset: 0
+    length: 1
+    signed: true
+    name: "Coolant temp"
+    filters: [{offset: -40}]
 
 binary_sensor:
   - platform: can_gateway
     port_id: port_a
     bus_off:
       name: "Bus A bus-off"
+  # v0.6 single-bit decode.
+  - platform: can_gateway
+    port_id: port_a
+    can_id: 0x3C0
+    bit: 5
+    name: "Brake pressed"
 
 text_sensor:
   - platform: can_gateway
@@ -143,6 +191,18 @@ text_sensor:
     throttle: 1s
     last_frame:
       name: "Port A last frame"
+  # v0.6 enum decode (raw integer -> string).
+  - platform: can_gateway
+    port_id: port_a
+    can_id: 0x1A0
+    offset: 0
+    length: 1
+    map:
+      0: "Park"
+      1: "Reverse"
+      2: "Neutral"
+      3: "Drive"
+    name: "Gear position"
 
 switch:
   - platform: can_gateway

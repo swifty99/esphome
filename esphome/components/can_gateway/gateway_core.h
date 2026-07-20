@@ -368,6 +368,11 @@ struct PortCounters {
   std::atomic<uint32_t> bus_err{0};
   std::atomic<uint32_t> err_events{0};
   std::atomic<uint32_t> recoveries{0};
+  /// Observation (v0.6): frames pushed to the observation ring for the decode /
+  /// subscription consumers, and frames shed because the ring was full. Written
+  /// only from the RX ISR when a consumer targets the port; zero otherwise.
+  std::atomic<uint32_t> observed{0};
+  std::atomic<uint32_t> observe_overflow{0};
 };
 
 /// Relaxed increment helper — every counter has a single writer context (see above), readers
@@ -598,5 +603,254 @@ class RecoveryBackoff {
   bool pending_{false};
   bool stable_since_valid_{false};
 };
+
+// ---------------------------------------------------------------------------------------------
+// Observation plane (v0.6) — deliver received frames to the application
+// ---------------------------------------------------------------------------------------------
+//
+// One-directional bridge from the RX ISR to loop context, so the application can *read* frames
+// (single-bus node, bulk signal decode, or a C++ transport layer). It adds a bounded, constant
+// amount of work to the RX ISR (N7): one membership test (SubscribedSet::contains, a binary
+// search) plus, on a hit, one ring-slot write (ObserveRing::push). It never allocates after
+// setup (N8) and is compiled out entirely when no consumer targets a port (B26).
+
+/// Non-owning view of a received frame, valid only for the duration of a subscriber callback
+/// (spec §9 interface contract). Points at loop-owned storage; the subscriber must copy anything
+/// it needs to keep.
+struct FrameView {
+  uint32_t can_id;
+  const uint8_t *data;
+  uint8_t dlc;
+  bool extended;
+  bool rtr;
+};
+
+/// One captured frame in the observation ring (A13): header + full payload, a fixed 16 bytes.
+/// Captured pre-filter and pre-patch, so the application sees the wire, not the routed result.
+struct FrameRecord {
+  uint32_t can_id{0};
+  uint8_t data[MAX_FRAME_DATA_LEN]{};
+  uint8_t dlc{0};
+  bool extended{false};
+  bool rtr{false};
+  uint8_t reserved{0};  // pad to a round 16 bytes
+};
+static_assert(sizeof(FrameRecord) == 16, "FrameRecord must stay a compact 16 bytes");
+
+/// Single-producer (RX ISR) / single-consumer (loop) bounded FIFO of frame records (A13).
+///
+/// Unlike SnapshotRing (keep-newest, for a debug sensor), this preserves arrival order and sheds
+/// the NEWEST record on overflow (B22): a stalled loop must never build an unbounded backlog of
+/// stale frames delivered late. Lock-free under the single-core model (the ISR produces, the loop
+/// consumes, ISRs run to completion); acquire/release atomics keep it correct on the host too.
+/// head_/tail_ are free-running counters; their difference is the occupancy (always <= N, so the
+/// unsigned subtraction never wraps meaningfully).
+template<uint16_t N> class ObserveRing {
+  static_assert(N >= 2, "observation ring needs at least two slots");
+
+ public:
+  /// Producer (ISR): enqueue one record. Returns false and mutates nothing when the ring is full,
+  /// so the caller counts observe_overflow and drops the newest frame (B22). Never overwrites an
+  /// unread record.
+  CAN_GATEWAY_CORE_INLINE bool push(const FrameRecord &record) {
+    uint32_t tail = this->tail_.load(std::memory_order_relaxed);
+    uint32_t head = this->head_.load(std::memory_order_acquire);
+    if (tail - head >= N)
+      return false;  // full
+    this->entries_[tail % N] = record;
+    this->tail_.store(tail + 1, std::memory_order_release);
+    return true;
+  }
+
+  /// Consumer (loop): dequeue the oldest record into `out`. Returns false when empty. The slot is
+  /// freed for the producer as soon as head_ advances, so the copy-out happens first.
+  bool pop(FrameRecord &out) {
+    uint32_t head = this->head_.load(std::memory_order_relaxed);
+    uint32_t tail = this->tail_.load(std::memory_order_acquire);
+    if (head == tail)
+      return false;
+    out = this->entries_[head % N];
+    this->head_.store(head + 1, std::memory_order_release);
+    return true;
+  }
+
+  bool empty() const {
+    return this->head_.load(std::memory_order_relaxed) == this->tail_.load(std::memory_order_acquire);
+  }
+  /// Occupancy (loop-context diagnostic; approximate while the ISR produces).
+  uint16_t size() const {
+    return static_cast<uint16_t>(this->tail_.load(std::memory_order_acquire) -
+                                 this->head_.load(std::memory_order_relaxed));
+  }
+  static constexpr uint16_t capacity() { return N; }
+
+ private:
+  FrameRecord entries_[N]{};
+  std::atomic<uint32_t> head_{0};  // consumer index (loop)
+  std::atomic<uint32_t> tail_{0};  // producer index (ISR)
+};
+
+/// Sorted set of subscribed (can_id, extended) keys for the RX ISR's membership test (A14/N7).
+/// Keys pack the frame type into the low bit — (can_id << 1) | extended — so 11-bit and 29-bit
+/// IDs stay distinct (a decode entry or subscriber names one frame type). Built once at setup
+/// (insert keeps the array sorted and unique); the ISR calls contains(), a bounded binary search
+/// over <= N keys — the only per-frame cost observation adds to the fast path. No division or
+/// modulo (both bounds move by shifts), so the search stays a handful of IRAM-resident branches.
+template<uint16_t N> class SubscribedSet {
+  static_assert(N > 0, "subscribed set needs capacity");
+
+ public:
+  static CAN_GATEWAY_CORE_INLINE uint32_t key_of(uint32_t can_id, bool extended) {
+    return (can_id << 1) | (extended ? 1u : 0u);
+  }
+
+  /// Setup only: insert one (can_id, extended). Keeps the array sorted and de-duplicated. Returns
+  /// false only when full (> N distinct IDs); the caller then logs and drops the surplus.
+  bool insert(uint32_t can_id, bool extended) {
+    uint32_t key = key_of(can_id, extended);
+    uint16_t lo = 0;
+    uint16_t hi = this->count_;
+    while (lo < hi) {
+      uint16_t mid = (lo + hi) >> 1;
+      if (this->keys_[mid] < key) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    if (lo < this->count_ && this->keys_[lo] == key)
+      return true;  // already present
+    if (this->count_ >= N)
+      return false;  // full
+    for (uint16_t i = this->count_; i > lo; i--)
+      this->keys_[i] = this->keys_[i - 1];
+    this->keys_[lo] = key;
+    this->count_++;
+    return true;
+  }
+
+  /// ISR: is this frame's (id, extended) subscribed? Bounded binary search (the N7 cost).
+  CAN_GATEWAY_CORE_INLINE bool contains(uint32_t can_id, bool extended) const {
+    uint32_t key = key_of(can_id, extended);
+    uint16_t lo = 0;
+    uint16_t hi = this->count_;
+    while (lo < hi) {
+      uint16_t mid = (lo + hi) >> 1;
+      uint32_t probe = this->keys_[mid];
+      if (probe < key) {
+        lo = mid + 1;
+      } else if (probe > key) {
+        hi = mid;
+      } else {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  uint16_t size() const { return this->count_; }
+  static constexpr uint16_t capacity() { return N; }
+
+ private:
+  uint32_t keys_[N]{};
+  uint16_t count_{0};
+};
+
+/// One frame subscriber: a callback plus the key it matches (or "all frames"). The callback is a
+/// plain function pointer + context, not a std::function, so the registry stays pure (host-
+/// testable), allocation-free, and pointer-sized. Object consumers (decode sensors, the transport
+/// layer) pass a static trampoline that recovers themselves from ctx — the project's forwarder
+/// convention, zero heap.
+using FrameCallbackFn = void (*)(void *ctx, const FrameView &view);
+
+struct FrameSubscriber {
+  uint32_t can_id{0};
+  bool extended{false};
+  bool all{false};  ///< subscribe_all(): matches every frame, ignores can_id/extended.
+  FrameCallbackFn fn{nullptr};
+  void *ctx{nullptr};
+
+  CAN_GATEWAY_CORE_INLINE bool matches(uint32_t id, bool ext) const {
+    return this->all || (this->can_id == id && this->extended == ext);
+  }
+};
+
+/// Dispatch one record to every matching subscriber in registration order (A14/B24). Loop context
+/// only. Each callback gets a non-owning FrameView valid just for the call. `subs` is the
+/// registration-ordered array; a linear scan keeps ordering trivial and, since the ISR already
+/// filtered to subscribed IDs, only frames a consumer wants ever reach here.
+inline void dispatch_record(const FrameSubscriber *subs, uint16_t count, const FrameRecord &record) {
+  FrameView view{record.can_id, record.data, record.dlc, record.extended, record.rtr};
+  for (uint16_t i = 0; i < count; i++) {
+    if (subs[i].matches(record.can_id, record.extended))
+      subs[i].fn(subs[i].ctx, view);
+  }
+}
+
+/// How the RX ISR receives a frame on a port, decided once at setup (A12/B20), never per frame:
+///  - FORWARD_SLOT: the port has an outbound route — receive straight into the destination TX
+///    slot (the v0.5 zero-copy path, unchanged). Observation, if any, reads from that slot.
+///  - STAGING: no outbound route but a consumer observes — receive into the port's static RX
+///    staging frame (there is no TX slot to borrow).
+///  - DISCARD: no route and no consumer — nothing to do; the driver drops the frame.
+enum class RxReceiveMode : uint8_t { DISCARD = 0, FORWARD_SLOT = 1, STAGING = 2 };
+
+CAN_GATEWAY_CORE_INLINE RxReceiveMode select_rx_mode(bool has_route, bool observes) {
+  if (has_route)
+    return RxReceiveMode::FORWARD_SLOT;
+  if (observes)
+    return RxReceiveMode::STAGING;
+  return RxReceiveMode::DISCARD;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Signal decode (v0.6) — extract a raw integer from a CAN payload
+// ---------------------------------------------------------------------------------------------
+//
+// Byte-aligned and bit-level forms, both bounded to 32 bits (either byte order). The exotic
+// Motorola backward-bit-numbering case and signals wider than 32 bits are deferred (spec). Pure
+// and branch-poor; the decode sensor calls these from loop context, not the ISR.
+
+/// Byte-aligned extraction: `byte_len` bytes (1-4) starting at `byte_offset`, assembled either
+/// little-endian (Intel, LSB first) or big-endian (Motorola, MSB first). Reads only within the
+/// frame's `dlc`; bytes at or beyond dlc read as 0 (the decode sensor checks presence first).
+CAN_GATEWAY_CORE_INLINE uint32_t extract_bytes(const uint8_t *data, uint8_t dlc, uint8_t byte_offset, uint8_t byte_len,
+                                               bool big_endian) {
+  uint32_t value = 0;
+  for (uint8_t i = 0; i < byte_len; i++) {
+    uint8_t index = static_cast<uint8_t>(byte_offset + i);
+    uint8_t byte = index < dlc ? data[index] : 0;
+    if (big_endian) {
+      value = (value << 8) | byte;
+    } else {
+      value |= static_cast<uint32_t>(byte) << (8 * i);
+    }
+  }
+  return value;
+}
+
+/// Bit-level extraction: `bit_len` bits (1-32) starting at `bit_offset`, using little-endian
+/// (Intel) bit numbering — the 8 payload bytes form a 64-bit little-endian word and the field is
+/// the bits [bit_offset, bit_offset + bit_len). Motorola backward-bit-numbering is deferred, so
+/// only this ordering is offered. Bytes beyond dlc contribute 0.
+CAN_GATEWAY_CORE_INLINE uint32_t extract_bits(const uint8_t *data, uint8_t dlc, uint8_t bit_offset, uint8_t bit_len) {
+  uint64_t word = 0;
+  uint8_t limit = dlc < MAX_FRAME_DATA_LEN ? dlc : MAX_FRAME_DATA_LEN;
+  for (uint8_t i = 0; i < limit; i++)
+    word |= static_cast<uint64_t>(data[i]) << (8 * i);
+  uint64_t mask = bit_len >= 64 ? ~0ull : ((1ull << bit_len) - 1);
+  return static_cast<uint32_t>((word >> bit_offset) & mask);
+}
+
+/// Sign-extend a `width`-bit raw value (1-32 bits) to a signed 32-bit integer. Unsigned callers
+/// skip this and reinterpret the raw bits directly.
+CAN_GATEWAY_CORE_INLINE int32_t sign_extend(uint32_t raw, uint8_t width) {
+  if (width >= 32)
+    return static_cast<int32_t>(raw);
+  uint32_t sign_bit = 1u << (width - 1);
+  if (raw & sign_bit)
+    return static_cast<int32_t>(raw | (~0u << width));
+  return static_cast<int32_t>(raw);
+}
 
 }  // namespace esphome::can_gateway

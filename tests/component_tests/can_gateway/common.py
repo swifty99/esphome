@@ -53,13 +53,18 @@ def gateway(
     ports: list[dict[str, Any]] | None = None,
     **extra: Any,
 ) -> dict[str, Any]:
-    """A gateway config with sensible defaults."""
-    config = {
+    """A gateway config with sensible defaults.
+
+    ``routes=[]`` omits the ``routes`` key entirely (a single-bus / monitor
+    config, v0.6); ``routes=None`` uses the default port_a -> port_b route.
+    """
+    config: dict[str, Any] = {
         "ports": ports if ports is not None else [dict(PORT_A), dict(PORT_B)],
-        "routes": (
-            routes if routes is not None else [{"from": "port_a", "to": "port_b"}]
-        ),
     }
+    if routes != []:
+        config["routes"] = (
+            routes if routes is not None else [{"from": "port_a", "to": "port_b"}]
+        )
     config.update(extra)
     return config
 

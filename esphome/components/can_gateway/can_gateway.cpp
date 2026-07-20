@@ -110,13 +110,20 @@ void GatewayRoute::add_rule(uint32_t match_id, uint32_t match_mask, uint8_t flag
 // GatewayPort: bring-up and control plane (loop context)
 // ---------------------------------------------------------------------------
 
-bool GatewayPort::start_(const GatewayRoute *route_out, const std::atomic<bool> *gateway_enabled,
+bool GatewayPort::start_(GatewayRoute *route_out, const std::atomic<bool> *gateway_enabled,
                          uint8_t interrupt_priority) {
   this->gateway_enabled_ = gateway_enabled;
   for (uint8_t i = 0; i < CAN_GATEWAY_INJECT_SLOTS; i++) {
     this->inject_slots_[i].port = this;
     this->inject_slots_[i].index = i;
   }
+
+#ifdef USE_CAN_GATEWAY_OBSERVE
+  // Build the observation set/ring from the codegen-registered subscribers and
+  // mark the route observed if forwarding — before try_hw_filter_offload_ below
+  // reads route->observed_ (B25).
+  this->build_observation_(route_out);
+#endif
 
   twai_onchip_node_config_t config{};
   config.io_cfg.tx = static_cast<gpio_num_t>(this->tx_pin_);
@@ -375,7 +382,48 @@ void GatewayPort::loop_(uint32_t now_ms) {
       this->err_counters_seeded_ = true;
     }
   }
+
+#ifdef USE_CAN_GATEWAY_OBSERVE
+  // Drain the observation ring and dispatch to the decode / subscription
+  // consumers (A14). Bounded per pass (B21); allocation-free (N8).
+  this->drain_observations_();
+#endif
 }
+
+#ifdef USE_CAN_GATEWAY_OBSERVE
+void GatewayPort::build_observation_(GatewayRoute *route_out) {
+  if (!this->observed_)
+    return;  // no consumer: no set, no ring, byte-identical fast path (B26)
+  // Static sorted membership set for the ISR (A14). Built once from the
+  // subscribers registered at codegen; const afterward.
+  this->subscribed_set_ = new SubscribedSet<CAN_GATEWAY_MAX_OBSERVE_IDS>();  // NOLINT(cppcoreguidelines-owning-memory)
+  for (const auto &sub : this->subscribers_) {
+    if (!sub.all && !this->subscribed_set_->insert(sub.can_id, sub.extended)) {
+      ESP_LOGW(TAG, "Port %u: over %u subscribed IDs; extra IDs will not be observed", this->index_,
+               CAN_GATEWAY_MAX_OBSERVE_IDS);
+    }
+  }
+  this->observe_ring_ = new ObserveRing<CAN_GATEWAY_OBSERVE_QUEUE_DEPTH>();  // NOLINT(cppcoreguidelines-owning-memory)
+  this->rx_staging_frame_.buffer = this->rx_staging_payload_;
+  // A forwarding port that also observes must keep the hardware filter offload
+  // off, or hardware-rejected frames would never reach the ring (B25).
+  if (route_out != nullptr)
+    route_out->mark_observed();
+}
+
+void GatewayPort::drain_observations_() {
+  if (this->observe_ring_ == nullptr)
+    return;
+  // Bounded drain (B21): at most max_frames_per_loop records this pass, the rest
+  // wait for the next loop, so a busy bus cannot stretch one loop iteration.
+  FrameRecord record;
+  uint8_t drained = 0;
+  while (drained < this->max_frames_per_loop_ && this->observe_ring_->pop(record)) {
+    dispatch_record(this->subscribers_.data(), static_cast<uint16_t>(this->subscribers_.size()), record);
+    drained++;
+  }
+}
+#endif
 
 #ifdef USE_CAN_GATEWAY_STATS
 void GatewayPort::log_statistics_(uint32_t now_ms) {
@@ -442,8 +490,16 @@ void GatewayPort::log_statistics_(uint32_t now_ms) {
 
 void IRAM_ATTR GatewayPort::handle_rx_isr() {
   GatewayRoute *route = this->route_out_;
-  if (route == nullptr)
-    return;  // destination-only port: the driver discards the frame
+  if (route == nullptr) {
+    // No outbound route. A port with an observation consumer receives into its
+    // static staging frame and delivers it (A12/B20); a true destination-only
+    // port has no ring and lets the driver discard the frame (v0.5 behavior).
+#ifdef USE_CAN_GATEWAY_OBSERVE
+    if (this->observe_ring_ != nullptr)
+      this->receive_and_observe_();
+#endif
+    return;
+  }
 
   // Shed order: enable check -> destination alive -> slot -> receive -> rules.
   // Sheds before receive_from_isr leave the frame to the driver (discarded);
@@ -503,6 +559,14 @@ void IRAM_ATTR GatewayPort::handle_rx_isr() {
   }
 #endif
 
+#ifdef USE_CAN_GATEWAY_OBSERVE
+  // Observation sees the wire, pre-patch: push from the freshly received slot
+  // before process_frame rewrites it. No-op (one null check) when this port has
+  // no consumer. A port that both forwards and observes keeps its route's
+  // hardware filter offload off (B25), so every accepted frame is visible here.
+  this->observe_frame_(can_id, extended, rtr, dlc, slot.payload);
+#endif
+
   // The frame's single copy already happened: receive_from_isr wrote straight
   // into the TX slot. Match and patch in place, then hand the slot over.
   FrameAction action = process_frame(route->table_, can_id, extended, rtr, slot.payload, dlc);
@@ -546,6 +610,67 @@ void IRAM_ATTR GatewayPort::handle_rx_isr() {
   dest->outstanding_.push(&slot);
   count(route->counters_.forwarded);
 }
+
+#ifdef USE_CAN_GATEWAY_OBSERVE
+void IRAM_ATTR GatewayPort::observe_frame_(uint32_t can_id, bool extended, bool rtr, uint8_t dlc, const uint8_t *data) {
+  if (this->observe_ring_ == nullptr)
+    return;
+  // The bounded N7 cost: one membership binary search. observe_all skips it.
+  if (!this->observe_all_ && !this->subscribed_set_->contains(can_id, extended))
+    return;
+  FrameRecord record;
+  record.can_id = can_id;
+  record.extended = extended;
+  record.rtr = rtr;
+  record.dlc = dlc;
+  record.reserved = 0;
+  for (uint8_t i = 0; i < MAX_FRAME_DATA_LEN; i++)
+    record.data[i] = i < dlc ? data[i] : 0;
+  if (this->observe_ring_->push(record)) {
+    count(this->counters_.observed);
+  } else {
+    count(this->counters_.observe_overflow);  // ring full: shed newest (B22)
+  }
+}
+
+void IRAM_ATTR GatewayPort::receive_and_observe_() {
+  // Observe-only receive path for a port with no outbound route (A12): there is
+  // no TX slot to receive into, so retrieve into the static staging frame. No
+  // enable / bus-off / slot gating — a monitor just reads its bus.
+  this->rx_staging_frame_.header = {};
+  this->rx_staging_frame_.buffer = this->rx_staging_payload_;
+  this->rx_staging_frame_.buffer_len = MAX_FRAME_DATA_LEN;
+  if (twai_node_receive_from_isr(this->node_, &this->rx_staging_frame_) != ESP_OK)
+    return;
+  uint32_t can_id = this->rx_staging_frame_.header.id;
+  bool extended = this->rx_staging_frame_.header.ide != 0;
+  bool rtr = this->rx_staging_frame_.header.rtr != 0;
+  uint8_t dlc = this->rx_staging_frame_.header.dlc > MAX_FRAME_DATA_LEN
+                    ? MAX_FRAME_DATA_LEN
+                    : static_cast<uint8_t>(this->rx_staging_frame_.header.dlc);
+
+#ifdef USE_CAN_GATEWAY_STATS
+  this->rx_bits_.fetch_add(estimate_frame_bits(extended, rtr, dlc), std::memory_order_relaxed);
+#ifdef USE_CAN_GATEWAY_ID_STATS
+  if (this->id_timing_ != nullptr)
+    this->id_timing_->record(can_id, extended, static_cast<uint32_t>(esp_timer_get_time()));
+#endif
+#endif
+#ifdef USE_CAN_GATEWAY_SNAPSHOT
+  if (this->snapshot_ring_ != nullptr) {
+    FrameSnapshot snapshot;
+    snapshot.can_id = can_id;
+    snapshot.dlc = dlc;
+    snapshot.extended = extended;
+    snapshot.rtr = rtr;
+    for (uint8_t i = 0; i < dlc; i++)
+      snapshot.data[i] = this->rx_staging_payload_[i];
+    this->snapshot_ring_->push(snapshot);
+  }
+#endif
+  this->observe_frame_(can_id, extended, rtr, dlc, this->rx_staging_payload_);
+}
+#endif  // USE_CAN_GATEWAY_OBSERVE
 
 void IRAM_ATTR GatewayPort::handle_tx_done_isr(const twai_tx_done_event_data_t *edata) {
   if (!edata->is_tx_success)
@@ -600,12 +725,17 @@ void IRAM_ATTR GatewayPort::handle_error_isr(twai_error_flags_t err_flags) {
 // ---------------------------------------------------------------------------
 
 void CanGateway::setup() {
-  if (this->ports_.size() != 2 || this->routes_.empty()) {
+  // v0.6: 1 or 2 ports; routes optional (a single-port block is a monitor/node
+  // with no forwarding). Config validation guarantees the count; guard anyway.
+  if (this->ports_.empty()) {
     this->mark_failed();
     return;
   }
   // One route per direction (enforced at config time too). Routes are only
-  // collected here, NOT wired into the ports yet — see below.
+  // collected here, NOT wired into the ports yet — see below. route_for[i] is
+  // nullptr for a port with no outbound route (destination-only, or a
+  // single-bus node): the port comes up and its RX ISR simply discards frames
+  // (v0.6 observation, added next, gives it a receive path).
   GatewayRoute *route_for[2] = {nullptr, nullptr};
   for (auto *route : this->routes_) {
     uint8_t from = route->from_->index_;
@@ -779,6 +909,12 @@ void CanGatewaySensorHub::update() {
       this->bus_load_seeded_ = true;
     }
 #endif
+    // Observation counters (v0.6): always present in PortCounters, zero unless a
+    // consumer targets the port.
+    if (this->sensors_[KIND_OBSERVED] != nullptr)
+      this->sensors_[KIND_OBSERVED]->publish_state(counters.observed.load(std::memory_order_relaxed));
+    if (this->sensors_[KIND_OBSERVE_OVERFLOW] != nullptr)
+      this->sensors_[KIND_OBSERVE_OVERFLOW]->publish_state(counters.observe_overflow.load(std::memory_order_relaxed));
   }
 }
 
@@ -790,6 +926,76 @@ void CanGatewaySensorHub::dump_config() {
   }
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// Signal decode entities (v0.6) — loop-context, publish on change (B23)
+// ---------------------------------------------------------------------------
+
+#ifdef USE_CAN_GATEWAY_OBSERVE
+#ifdef USE_SENSOR
+void CanGatewayDecodeSensor::on_frame(const FrameView &view) {
+  // Presence: the signal's highest byte must lie within this frame's DLC.
+  uint8_t last_byte = this->bit_mode_ ? static_cast<uint8_t>((this->offset_ + this->length_ - 1) / 8)
+                                      : static_cast<uint8_t>(this->offset_ + this->length_ - 1);
+  if (last_byte >= view.dlc)
+    return;
+  uint32_t raw = this->bit_mode_ ? extract_bits(view.data, view.dlc, this->offset_, this->length_)
+                                 : extract_bytes(view.data, view.dlc, this->offset_, this->length_, this->big_endian_);
+  if (this->have_last_ && raw == this->last_raw_)
+    return;  // publish on change
+  uint32_t now = millis();
+  if (this->throttle_ms_ > 0 && this->have_last_ && now - this->last_publish_ms_ < this->throttle_ms_)
+    return;  // rate-limit a signal that changes every frame
+  this->last_raw_ = raw;
+  this->last_publish_ms_ = now;
+  this->have_last_ = true;
+  uint8_t width = this->bit_mode_ ? this->length_ : static_cast<uint8_t>(this->length_ * 8);
+  float value = this->is_signed_ ? static_cast<float>(sign_extend(raw, width)) : static_cast<float>(raw);
+  this->publish_state(value);  // engineering-units scaling is left to sensor filters
+}
+#endif  // USE_SENSOR
+
+#ifdef USE_BINARY_SENSOR
+void CanGatewayDecodeBinarySensor::on_frame(const FrameView &view) {
+  uint8_t byte_index = static_cast<uint8_t>(this->bit_ / 8);
+  if (byte_index >= view.dlc)
+    return;
+  bool state = ((view.data[byte_index] >> (this->bit_ % 8)) & 0x01) != 0;
+  if (this->have_last_ && state == this->last_state_)
+    return;
+  this->last_state_ = state;
+  this->have_last_ = true;
+  this->publish_state(state);
+}
+#endif  // USE_BINARY_SENSOR
+
+#ifdef USE_TEXT_SENSOR
+void CanGatewayDecodeTextSensor::on_frame(const FrameView &view) {
+  uint8_t last_byte = static_cast<uint8_t>(this->offset_ + this->length_ - 1);
+  if (last_byte >= view.dlc)
+    return;
+  uint32_t raw = extract_bytes(view.data, view.dlc, this->offset_, this->length_, this->big_endian_);
+  if (this->have_last_ && raw == this->last_raw_)
+    return;
+  uint32_t now = millis();
+  if (this->throttle_ms_ > 0 && this->have_last_ && now - this->last_publish_ms_ < this->throttle_ms_)
+    return;
+  this->last_raw_ = raw;
+  this->last_publish_ms_ = now;
+  this->have_last_ = true;
+  for (uint16_t i = 0; i < this->map_count_; i++) {
+    if (this->map_[i].key == raw) {
+      this->publish_state(this->map_[i].value);
+      return;
+    }
+  }
+  // No mapping: publish the raw value as hex (like the last_frame snapshot).
+  char buffer[16];
+  snprintf(buffer, sizeof(buffer), "0x%" PRIX32, raw);
+  this->publish_state(buffer);
+}
+#endif  // USE_TEXT_SENSOR
+#endif  // USE_CAN_GATEWAY_OBSERVE
 
 }  // namespace esphome::can_gateway
 

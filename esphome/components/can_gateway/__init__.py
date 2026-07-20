@@ -1,8 +1,12 @@
 """can_gateway: ISR-level CAN<->CAN gateway on the ESP32-C6 dual TWAI.
 
-Validation rules are numbered V1-V16: each validator's docstring below carries
+Validation rules are numbered V1-V25: each validator's docstring below carries
 its number, and the component tests in tests/component_tests/can_gateway/
 reference the same numbers (test_v01_..., cfg-v01 section markers).
+
+v0.6 relaxes the two-port bridge into a component that is also a single-bus
+node: 1 or 2 ports (V17), routes optional (V18), plus a receive path to the
+application (observation ring + signal decode).
 """
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ from esphome.const import (
     CONF_ID,
     CONF_INDEX,
     CONF_INTERVAL,
+    CONF_LENGTH,
+    CONF_OFFSET,
     CONF_PORT,
     CONF_RX_PIN,
     CONF_TO,
@@ -48,8 +54,8 @@ CONFLICTS_WITH = ["esp32_can"]
 #
 # CanGateway : public Component
 #   CanGateway(uint8_t interrupt_priority)
-#   void add_port(GatewayPort *port)                  // called exactly twice
-#   void add_route(GatewayRoute *route)
+#   void add_port(GatewayPort *port)                  // once or twice (V17)
+#   void add_route(GatewayRoute *route)               // per route (optional)
 #   void add_cyclic_send(CyclicSend *cyclic)          // per cyclic_sends entry
 #   void set_stats_log_interval(uint32_t interval_ms) // statistics block
 #   void set_id_timings_enabled(bool enabled)         // statistics.id_timings
@@ -95,7 +101,8 @@ CONFLICTS_WITH = ["esp32_can"]
 #   // play(): stage all entries on the parent RulePatch, then commit()
 #
 # template<typename... Ts> InjectAction : Action<Ts...>, Parented<GatewayPort>
-#   void set_frame(uint32_t can_id, bool extended, bool rtr)
+#   void set_flags(bool extended, bool rtr)              // can_gateway.send
+#   void set_can_id(uint32_t) / set_can_id_template(uint32_t (*)(Ts...))
 #   void set_data_static(const uint8_t *data, uint8_t len)
 #   void set_data_template(std::vector<uint8_t> (*func)(Ts...))
 #
@@ -158,9 +165,17 @@ CONF_STATISTICS = "statistics"
 CONF_LOG_INTERVAL = "log_interval"
 CONF_ID_TIMINGS = "id_timings"
 CONF_ID_TIMINGS_MAX = "id_timings_max"
+CONF_OBSERVE_QUEUE_DEPTH = "observe_queue_depth"
+CONF_MAX_FRAMES_PER_LOOP = "max_frames_per_loop"
+
+# Fixed bound on the per-port subscribed-ID membership set (spec N7). Must match
+# CAN_GATEWAY_MAX_OBSERVE_IDS in the C++ header default (defines.h).
+OBSERVE_MAX_IDS = 128
+OBSERVE_QUEUE_DEPTH_DEFAULT = 32
 
 ACTION_SET_PATCH = "can_gateway.set_patch"
-ACTION_INJECT = "can_gateway.inject"
+ACTION_SEND = "can_gateway.send"
+ACTION_INJECT = "can_gateway.inject"  # v0.4/v0.5 name; kept as a can_gateway.send alias
 ACTION_SET_CYCLIC_DATA = "can_gateway.set_cyclic_data"
 ACTION_START_CYCLIC = "can_gateway.start_cyclic"
 ACTION_STOP_CYCLIC = "can_gateway.stop_cyclic"
@@ -258,9 +273,20 @@ def _validate_patch_bytes(patches):
 
 
 def _validate_port(port):
-    """V12: bench aids that contradict each other."""
+    """V12: bench aids that contradict each other. V23: drain cap vs ring depth."""
     if port[CONF_SELF_TEST] and port[CONF_LISTEN_ONLY]:
         raise cv.Invalid("self_test and listen_only are mutually exclusive")
+    # V23: max_frames_per_loop defaults to the ring depth and may not exceed it
+    # (you cannot drain more records per loop than the ring can hold).
+    depth = port[CONF_OBSERVE_QUEUE_DEPTH]
+    if CONF_MAX_FRAMES_PER_LOOP not in port:
+        port[CONF_MAX_FRAMES_PER_LOOP] = depth
+    elif port[CONF_MAX_FRAMES_PER_LOOP] > depth:
+        raise cv.Invalid(
+            f"max_frames_per_loop ({port[CONF_MAX_FRAMES_PER_LOOP]}) cannot exceed "
+            f"observe_queue_depth ({depth})",
+            path=[CONF_MAX_FRAMES_PER_LOOP],
+        )
     return port
 
 
@@ -270,10 +296,13 @@ _validate_frame_data = cv.All(cv.ensure_list(cv.hex_uint8_t), cv.Length(max=8))
 
 def _validate_tx_frame(config):
     """A transmitted frame's static constraints, shared by cyclic sends (V16)
-    and can_gateway.inject (V11). Cross-references live elsewhere."""
-    _check_id_fits(config[CONF_CAN_ID], config[CONF_USE_EXTENDED_ID], "can_id")
+    and can_gateway.send (V11). Cross-references live elsewhere."""
+    # can_id is templatable on send; only a literal can be bounds-checked here.
+    can_id = config[CONF_CAN_ID]
+    if not cg.is_template(can_id):
+        _check_id_fits(can_id, config[CONF_USE_EXTENDED_ID], "can_id")
     data = config[CONF_DATA]
-    # Templatable data (inject) may be a lambda; only literal lists can be
+    # Templatable data (send) may be a lambda; only literal lists can be
     # checked against the RTR rule here.
     if config[CONF_REMOTE_TRANSMISSION_REQUEST] and isinstance(data, list) and data:
         raise cv.Invalid("RTR frames carry no data")
@@ -281,17 +310,28 @@ def _validate_tx_frame(config):
 
 
 def _validate_gateway(config):
-    """V1 and V7: cross-references between ports and routes."""
+    """V1/V17 (port count), V7/V18 (routes): cross-references between ports
+    and routes."""
     ports = config[CONF_PORTS]
-    if len(ports) != 2:
+    # V17: 1 or 2 ports (the C6 has two TWAI controllers).
+    if not 1 <= len(ports) <= 2:
         raise cv.Invalid(
-            f"can_gateway requires exactly 2 ports (got {len(ports)}); "
+            f"can_gateway supports 1 or 2 ports (got {len(ports)}); "
             f"the ESP32-C6 has two TWAI controllers"
+        )
+    routes = config.get(CONF_ROUTES, [])
+    # V18: forwarding needs a second controller to forward to. A single-port
+    # block is a monitor/node — it reads and sends, but bridges nothing.
+    if len(ports) < 2 and routes:
+        raise cv.Invalid(
+            "routes require two ports; a single-port can_gateway is a "
+            "monitor/node with no forwarding — remove routes or add a second port",
+            path=[CONF_ROUTES],
         )
     port_names = [str(port[CONF_ID]) for port in ports]
     listen_only_ports = {str(port[CONF_ID]) for port in ports if port[CONF_LISTEN_ONLY]}
     seen_sources: set[str] = set()
-    for index, route in enumerate(config[CONF_ROUTES]):
+    for index, route in enumerate(routes):
         source = str(route[CONF_FROM])
         target = str(route[CONF_TO])
         if source in seen_sources:
@@ -383,6 +423,11 @@ PORT_SCHEMA = cv.All(
             cv.Required(CONF_BIT_RATE): validate_bit_rate,
             cv.Optional(CONF_LISTEN_ONLY, default=False): cv.boolean,
             cv.Optional(CONF_TX_QUEUE_DEPTH, default=8): cv.int_range(min=1, max=64),
+            # v0.6 observation ring depth (A13) and per-loop drain cap (B21).
+            cv.Optional(
+                CONF_OBSERVE_QUEUE_DEPTH, default=OBSERVE_QUEUE_DEPTH_DEFAULT
+            ): cv.int_range(min=4, max=128),
+            cv.Optional(CONF_MAX_FRAMES_PER_LOOP): cv.int_range(min=1, max=128),
             cv.Optional(CONF_SELF_TEST, default=False): cv.boolean,
             cv.Optional(CONF_OPEN_DRAIN_TX, default=False): cv.boolean,
             cv.Optional(CONF_ON_BUS_OFF): automation.validate_automation({}),
@@ -435,12 +480,96 @@ STATISTICS_SCHEMA = cv.Schema(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Signal decode (v0.6, S9) — shared schema/validation for the entity platforms
+# ---------------------------------------------------------------------------
+
+CONF_BIT_OFFSET = "bit_offset"
+CONF_BIT_LENGTH = "bit_length"
+CONF_BYTE_ORDER = "byte_order"
+CONF_SIGNED = "signed"
+CONF_BIT = "bit"
+CONF_MAP = "map"
+
+BYTE_ORDER_LITTLE = "little"
+BYTE_ORDER_BIG = "big"
+
+
+def decode_source_schema() -> dict:
+    """The keys naming where a signal lives: source port, message ID, type."""
+    return {
+        cv.Required(CONF_PORT_ID): cv.use_id(GatewayPort),
+        cv.Required(CONF_CAN_ID): cv.int_range(min=0, max=EXTENDED_ID_MAX),
+        cv.Optional(CONF_USE_EXTENDED_ID, default=False): cv.boolean,
+    }
+
+
+def validate_decode_id(config):
+    """V19: a decode entry's can_id fits the frame type it selects."""
+    _check_id_fits(config[CONF_CAN_ID], config[CONF_USE_EXTENDED_ID], "can_id")
+    return config
+
+
+def validate_signal_position(config):
+    """V20: the signal lies inside the frame; the byte-aligned and bit-level
+    forms are mutually exclusive; both are bounded to 32 bits."""
+    # Each form needs both of its keys.
+    if (CONF_OFFSET in config) != (CONF_LENGTH in config):
+        raise cv.Invalid("the byte-aligned form needs both offset and length")
+    if (CONF_BIT_OFFSET in config) != (CONF_BIT_LENGTH in config):
+        raise cv.Invalid("the bit-level form needs both bit_offset and bit_length")
+    has_byte = CONF_OFFSET in config
+    has_bit = CONF_BIT_OFFSET in config
+    if has_byte and has_bit:
+        raise cv.Invalid(
+            "use either offset/length (byte-aligned) or bit_offset/bit_length "
+            "(bit-level), not both"
+        )
+    if not has_byte and not has_bit:
+        raise cv.Invalid(
+            "a decode signal needs a position: offset + length (byte-aligned) "
+            "or bit_offset + bit_length (bit-level)"
+        )
+    if has_byte:
+        offset = config[CONF_OFFSET]
+        length = config[CONF_LENGTH]
+        if offset + length > 8:
+            raise cv.Invalid(
+                f"offset ({offset}) + length ({length}) runs past the 8-byte frame"
+            )
+        if length > 4:
+            raise cv.Invalid(
+                "byte-aligned signals wider than 32 bits (length > 4) are not "
+                "supported; >32-bit decode is deferred — use a lambda filter"
+            )
+    else:
+        bit_offset = config[CONF_BIT_OFFSET]
+        bit_length = config[CONF_BIT_LENGTH]
+        if bit_offset + bit_length > 64:
+            raise cv.Invalid(
+                f"bit_offset ({bit_offset}) + bit_length ({bit_length}) runs past "
+                f"the 64-bit frame"
+            )
+        # Bit-level extraction uses little-endian (Intel) bit numbering. The
+        # Motorola backward-bit-numbering case is deferred (spec), so a
+        # big-endian bit-level field would decode wrong — reject it.
+        if config.get(CONF_BYTE_ORDER, BYTE_ORDER_LITTLE) == BYTE_ORDER_BIG:
+            raise cv.Invalid(
+                "big-endian byte order is not supported for a bit-level field "
+                "(Motorola backward-bit-numbering is deferred); use the "
+                "byte-aligned form, or little-endian"
+            )
+    return config
+
+
 CONFIG_SCHEMA = cv.All(
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(CanGateway),
             cv.Required(CONF_PORTS): cv.ensure_list(PORT_SCHEMA),
-            cv.Required(CONF_ROUTES): cv.All(
+            # V18: routes are optional (a single-port block is a monitor/node
+            # with no forwarding). Two ports remain required to declare any.
+            cv.Optional(CONF_ROUTES): cv.All(
                 cv.ensure_list(ROUTE_SCHEMA), cv.Length(min=1)
             ),
             cv.Optional(CONF_INTERRUPT_PRIORITY, default=2): cv.int_range(min=1, max=3),
@@ -491,18 +620,47 @@ SET_PATCH_ACTION_SCHEMA = cv.All(
 )
 
 
-INJECT_ACTION_SCHEMA = cv.All(
+def _validate_send_data(value):
+    """Payload for can_gateway.send: a 0-8 byte list, or an ASCII string (like
+    canbus.send). Lambdas pass through cv.templatable before reaching here."""
+    if isinstance(value, str):
+        data = list(value.encode("utf-8"))
+        if len(data) > 8:
+            raise cv.Invalid("a string payload must be at most 8 bytes")
+        return data
+    return _validate_frame_data(value)
+
+
+def _send_shorthand(value):
+    """Shorthand `can_gateway.send: [0x01, 0x02]` / "abc" -> {data: ...}. A
+    can_id is still required (a gateway port has no default ID), so the
+    shorthand is only useful together with a dict — but a bare list/string maps
+    to the data key for symmetry with canbus.send."""
+    if isinstance(value, (list, str)):
+        return {CONF_DATA: value}
+    return value
+
+
+# can_gateway.send (v0.6). port omittable when exactly one port is declared
+# (resolved / enforced in final validation, V22); can_id templatable.
+SEND_ACTION_SCHEMA = cv.All(
+    _send_shorthand,
     cv.Schema(
         {
-            cv.Required(CONF_PORT): cv.use_id(GatewayPort),
-            cv.Required(CONF_CAN_ID): cv.int_range(min=0, max=EXTENDED_ID_MAX),
+            cv.Optional(CONF_PORT): cv.use_id(GatewayPort),
+            cv.Required(CONF_CAN_ID): cv.templatable(
+                cv.int_range(min=0, max=EXTENDED_ID_MAX)
+            ),
             cv.Optional(CONF_USE_EXTENDED_ID, default=False): cv.boolean,
             cv.Optional(CONF_REMOTE_TRANSMISSION_REQUEST, default=False): cv.boolean,
-            cv.Optional(CONF_DATA, default=[]): cv.templatable(_validate_frame_data),
+            cv.Optional(CONF_DATA, default=[]): cv.templatable(_validate_send_data),
         }
     ),
     _validate_tx_frame,
 )
+
+# Backwards-compatible alias name for the reshaped action.
+INJECT_ACTION_SCHEMA = SEND_ACTION_SCHEMA
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +672,7 @@ def _collect_actions(node, found: list) -> None:
     """Recursively find gateway actions anywhere in the validated config."""
     if isinstance(node, dict):
         for key, value in node.items():
-            if key in (ACTION_SET_PATCH, ACTION_INJECT):
+            if key in (ACTION_SET_PATCH, ACTION_SEND, ACTION_INJECT):
                 found.append((key, value))
             _collect_actions(value, found)
     elif isinstance(node, list):
@@ -526,7 +684,7 @@ def _declared_patch_shapes(config) -> dict[str, tuple[set[int], bool, bool]]:
     """Map rule-id name -> (declared byte indices, declares can_id, output
     frame type is extended)."""
     shapes: dict[str, tuple[set[int], bool, bool]] = {}
-    for route in config[CONF_ROUTES]:
+    for route in config.get(CONF_ROUTES, []):
         for rule in route.get(CONF_FILTERS, []):
             if (rule_id := rule.get(CONF_ID)) is None:
                 continue
@@ -539,6 +697,7 @@ def _declared_patch_shapes(config) -> dict[str, tuple[set[int], bool, bool]]:
 
 def _final_validate(config):
     full_config = fv.full_config.get()
+    routes = config.get(CONF_ROUTES, [])
 
     # At most one enable switch (V8).
     gateway_switches = [
@@ -548,6 +707,15 @@ def _final_validate(config):
     ]
     if len(gateway_switches) > 1:
         raise cv.Invalid("only one can_gateway switch is allowed")
+    # V21: the enable switch gates forwarding only. With no route there is
+    # nothing to gate, so the switch would be a dead entity — reject it and
+    # name the reason (B27).
+    if gateway_switches and not routes:
+        raise cv.Invalid(
+            "a can_gateway switch gates forwarding on/off, but this gateway "
+            "has no routes to gate; remove the switch (a single-bus node has "
+            "no forwarding to disable)"
+        )
 
     shapes = _declared_patch_shapes(config)
     listen_only_ports = {
@@ -580,29 +748,40 @@ def _final_validate(config):
                         f"rule '{rule_name}' does not declare byte index "
                         f"{patch[CONF_INDEX]} in its modify.data"
                     )
-        elif action_name == ACTION_INJECT:
+        elif action_name in (ACTION_SEND, ACTION_INJECT):
+            # V22: `port` may be omitted only when exactly one port is declared;
+            # resolve it to that port so codegen always has one.
+            if CONF_PORT not in action:
+                if len(config[CONF_PORTS]) != 1:
+                    raise cv.Invalid(
+                        f"'{action_name}' needs a 'port': more than one port is "
+                        f"declared, so it cannot be inferred"
+                    )
+                action[CONF_PORT] = config[CONF_PORTS][0][CONF_ID]
             if str(action[CONF_PORT]) in listen_only_ports:
                 raise cv.Invalid(
-                    f"cannot inject on listen-only port '{action[CONF_PORT]}'"
+                    f"cannot send on listen-only port '{action[CONF_PORT]}'"
                 )
 
-    # bus_load measures the traffic the gateway itself receives and transmits
-    # on a port. A port that is not any route's source never receives through
-    # the gateway, so its gauge would only show the own-TX share — reject it
-    # instead of publishing a misleading number.
-    source_ports = {str(route[CONF_FROM]) for route in config[CONF_ROUTES]}
+    # V24: bus_load measures the traffic the gateway receives and transmits on
+    # a port. A route source receives frames to forward; a single-bus / monitor
+    # port (no route) receives them for observation — both are meaningful. Only
+    # a pure route *destination* never receives through the gateway, so its
+    # gauge would show the own-TX share alone; reject that one case.
+    source_ports = {str(route[CONF_FROM]) for route in routes}
+    dest_only_ports = {str(route[CONF_TO]) for route in routes} - source_ports
     for entry in full_config.get("sensor", []):
         if entry.get("platform") != "can_gateway":
             continue
         if (
             "bus_load" in entry
             and (port_ref := entry.get(CONF_PORT_ID)) is not None
-            and str(port_ref) not in source_ports
+            and str(port_ref) in dest_only_ports
         ):
             raise cv.Invalid(
                 f"bus_load on port '{port_ref}' would only measure the "
-                f"gateway's own transmissions; the port is not a route "
-                f"source, so received frames never reach the gateway"
+                f"gateway's own transmissions; the port is a route destination "
+                f"only, so received frames never reach the gateway"
             )
     return config
 
@@ -703,6 +882,15 @@ async def to_code(config):
         cyclic_per_port[key] = cyclic_per_port.get(key, 0) + 1
     max_cyclic_per_port = max(cyclic_per_port.values(), default=0)
     cg.add_define("CAN_GATEWAY_INJECT_SLOTS", max(4, max_cyclic_per_port + 2))
+    # Observation ring size (A13) — one static ring per observing port, sized to
+    # the largest configured observe_queue_depth. The subscribed-ID set is a
+    # fixed N7 bound. Both are only instantiated under USE_CAN_GATEWAY_OBSERVE,
+    # emitted by the decode entity platforms; harmless sizes otherwise.
+    max_observe_depth = max(
+        port[CONF_OBSERVE_QUEUE_DEPTH] for port in config[CONF_PORTS]
+    )
+    cg.add_define("CAN_GATEWAY_OBSERVE_QUEUE_DEPTH", max_observe_depth)
+    cg.add_define("CAN_GATEWAY_MAX_OBSERVE_IDS", OBSERVE_MAX_IDS)
 
     var = cg.new_Pvariable(config[CONF_ID], config[CONF_INTERRUPT_PRIORITY])
     await cg.register_component(var, config)
@@ -722,6 +910,7 @@ async def to_code(config):
         if port_config[CONF_OPEN_DRAIN_TX]:
             cg.add(port.set_open_drain_tx(True))
         cg.add(port.set_tx_queue_depth(port_config[CONF_TX_QUEUE_DEPTH]))
+        cg.add(port.set_max_frames_per_loop(port_config[CONF_MAX_FRAMES_PER_LOOP]))
         cg.add(var.add_port(port))
         for conf in port_config.get(CONF_ON_BUS_OFF, []):
             await automation.build_callback_automation(
@@ -732,7 +921,7 @@ async def to_code(config):
                 port, "add_on_recovered_callback", [], conf
             )
 
-    for route_config in config[CONF_ROUTES]:
+    for route_config in config.get(CONF_ROUTES, []):
         source = await cg.get_variable(route_config[CONF_FROM])
         target = await cg.get_variable(route_config[CONF_TO])
         rules = route_config.get(CONF_FILTERS, [])
@@ -842,21 +1031,38 @@ async def _add_payload_codegen(var, data, action_id, args):
         cg.add(var.set_data_static(cg.nullptr, 0))
 
 
-@automation.register_action(
-    ACTION_INJECT, InjectAction, INJECT_ACTION_SCHEMA, synchronous=True
-)
-async def inject_action_to_code(config, action_id, template_arg, args):
+async def _send_action_to_code(config, action_id, template_arg, args):
     var = cg.new_Pvariable(action_id, template_arg)
     await cg.register_parented(var, config[CONF_PORT])
     cg.add(
-        var.set_frame(
-            config[CONF_CAN_ID],
+        var.set_flags(
             config[CONF_USE_EXTENDED_ID],
             config[CONF_REMOTE_TRANSMISSION_REQUEST],
         )
     )
+    can_id = config[CONF_CAN_ID]
+    if cg.is_template(can_id):
+        template_ = await cg.templatable(can_id, args, cg.uint32)
+        cg.add(var.set_can_id_template(template_))
+    else:
+        cg.add(var.set_can_id(can_id))
     await _add_payload_codegen(var, config[CONF_DATA], action_id, args)
     return var
+
+
+@automation.register_action(
+    ACTION_SEND, InjectAction, SEND_ACTION_SCHEMA, synchronous=True
+)
+async def send_action_to_code(config, action_id, template_arg, args):
+    return await _send_action_to_code(config, action_id, template_arg, args)
+
+
+# can_gateway.inject is the pre-v0.6 name, kept as an alias for one cycle.
+@automation.register_action(
+    ACTION_INJECT, InjectAction, SEND_ACTION_SCHEMA, synchronous=True
+)
+async def inject_action_to_code(config, action_id, template_arg, args):
+    return await _send_action_to_code(config, action_id, template_arg, args)
 
 
 # ---------------------------------------------------------------------------

@@ -28,16 +28,17 @@ def test_v01_bidirectional_routes_accepted(set_core_config) -> None:
     assert len(validated["routes"]) == 2
 
 
-def test_v01_one_port_rejected(set_core_config) -> None:
+def test_v01_single_port_no_routes_accepted(set_core_config) -> None:
+    # v0.6: a single-port block with no routes is a valid monitor/node (V17).
     setup_c6(set_core_config)
-    with pytest.raises(cv.Invalid, match="exactly 2"):
-        validate(gateway(ports=[dict(PORT_A)]))
+    validated = validate(gateway(ports=[dict(PORT_A)], routes=[]))
+    assert len(validated["ports"]) == 1
 
 
 def test_v01_three_ports_rejected(set_core_config) -> None:
     setup_c6(set_core_config)
     third = port(PORT_A, id="port_c", rx_pin="GPIO5", tx_pin="GPIO4")
-    with pytest.raises(cv.Invalid, match="exactly 2"):
+    with pytest.raises(cv.Invalid, match="1 or 2 ports"):
         validate(gateway(ports=[dict(PORT_A), dict(PORT_B), third]))
 
 
@@ -53,10 +54,20 @@ def test_v01_route_to_undeclared_port_rejected(set_core_config) -> None:
         validate(gateway(routes=[{"from": "port_a", "to": "port_x"}]))
 
 
-def test_v01_no_routes_rejected(set_core_config) -> None:
+def test_v01_two_ports_no_routes_accepted(set_core_config) -> None:
+    # v0.6: two ports with no routes is two independent monitor buses (no
+    # forwarding compiled in). Was rejected pre-v0.6.
+    setup_c6(set_core_config)
+    validated = validate(gateway(routes=[]))
+    assert len(validated["ports"]) == 2
+    assert "routes" not in validated
+
+
+def test_v18_explicit_empty_routes_rejected(set_core_config) -> None:
+    # An explicit `routes: []` is a user mistake — omit the key instead.
     setup_c6(set_core_config)
     with pytest.raises(cv.Invalid):
-        validate(gateway(routes=[]))
+        validate({"ports": [dict(PORT_A), dict(PORT_B)], "routes": []})
 
 
 def test_v01_duplicate_direction_rejected(set_core_config) -> None:

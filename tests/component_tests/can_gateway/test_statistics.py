@@ -86,7 +86,7 @@ def test_bus_load_requires_route_source_port(
             }
         ],
     )
-    with pytest.raises(cv.Invalid, match="route source"):
+    with pytest.raises(cv.Invalid, match="route destination only"):
         FINAL_VALIDATE_SCHEMA(config)
 
 
