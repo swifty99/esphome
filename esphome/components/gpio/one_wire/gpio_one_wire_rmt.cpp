@@ -23,6 +23,7 @@ static constexpr uint32_t SLOT_IDLE_US = 100;
 static constexpr uint32_t RESET_IDLE_US = one_wire_rmt::RESET_LOW_US + 100;
 static constexpr uint32_t SLOT_US = 70;
 static constexpr uint32_t TIMEOUT_MARGIN_MS = 10;
+static constexpr uint8_t SEARCH_ATTEMPTS = 3;
 
 static const rmt_transmit_config_t TX_CONFIG = {
     .loop_count = 0,
@@ -53,14 +54,7 @@ static bool IRAM_ATTR rx_done(rmt_channel_handle_t, const rmt_rx_done_event_data
 }
 
 void GPIOOneWireBus::destroy_() {
-  if (this->bytes_encoder_ != nullptr) {
-    rmt_del_encoder(this->bytes_encoder_);
-    this->bytes_encoder_ = nullptr;
-  }
-  if (this->copy_encoder_ != nullptr) {
-    rmt_del_encoder(this->copy_encoder_);
-    this->copy_encoder_ = nullptr;
-  }
+  // The channels go first, they use the encoders
   if (this->rx_channel_ != nullptr) {
     rmt_disable(this->rx_channel_);
     rmt_del_channel(this->rx_channel_);
@@ -70,6 +64,14 @@ void GPIOOneWireBus::destroy_() {
     rmt_disable(this->tx_channel_);
     rmt_del_channel(this->tx_channel_);
     this->tx_channel_ = nullptr;
+  }
+  if (this->bytes_encoder_ != nullptr) {
+    rmt_del_encoder(this->bytes_encoder_);
+    this->bytes_encoder_ = nullptr;
+  }
+  if (this->copy_encoder_ != nullptr) {
+    rmt_del_encoder(this->copy_encoder_);
+    this->copy_encoder_ = nullptr;
   }
   if (this->rx_queue_ != nullptr) {
     vQueueDelete(this->rx_queue_);
@@ -151,10 +153,18 @@ void GPIOOneWireBus::setup() {
     this->mark_failed(LOG_STR("Releasing the bus failed"));
     return;
   }
-  this->search();
+  // A failed transfer ends a search like a bus without devices, so look again if one failed
+  for (uint8_t attempt = 0; attempt < SEARCH_ATTEMPTS; attempt++) {
+    this->transfer_failed_ = false;
+    this->search();
+    if (!this->transfer_failed_)
+      break;
+  }
 }
 
 void GPIOOneWireBus::report_(bool ok, const LogString *reason) {
+  if (!ok)
+    this->transfer_failed_ = true;
   if (ok) {
     this->status_clear_warning();
   } else {
@@ -162,16 +172,30 @@ void GPIOOneWireBus::report_(bool ok, const LogString *reason) {
   }
 }
 
+void GPIOOneWireBus::cancel_() {
+  // Disabling a channel stops what it is doing, enabling it makes it ready for the next transfer
+  rmt_disable(this->rx_channel_);
+  rmt_disable(this->tx_channel_);
+  rmt_enable(this->rx_channel_);
+  rmt_enable(this->tx_channel_);
+}
+
 bool GPIOOneWireBus::send_(rmt_encoder_handle_t encoder, const void *data, size_t size, uint32_t duration_us) {
+  if (this->is_failed())
+    return false;
   uint32_t timeout_ms = duration_us / 1000 + TIMEOUT_MARGIN_MS;
   bool ok = rmt_transmit(this->tx_channel_, encoder, data, size, &TX_CONFIG) == ESP_OK &&
             rmt_tx_wait_all_done(this->tx_channel_, timeout_ms) == ESP_OK;
+  if (!ok)
+    this->cancel_();
   this->report_(ok, LOG_STR("RMT transmit failed"));
   return ok;
 }
 
 bool GPIOOneWireBus::exchange_(rmt_encoder_handle_t encoder, const void *data, size_t size, uint32_t idle_us,
                                uint32_t duration_us, Phase *phases, size_t &phase_count) {
+  if (this->is_failed())
+    return false;
   uint32_t timeout_ms = duration_us / 1000 + TIMEOUT_MARGIN_MS;
   rmt_receive_config_t rx_config = {};
   rx_config.signal_range_min_ns = GLITCH_FILTER_NS;
@@ -185,9 +209,8 @@ bool GPIOOneWireBus::exchange_(rmt_encoder_handle_t encoder, const void *data, s
       xQueueReceive(this->rx_queue_, &event, pdMS_TO_TICKS(timeout_ms)) == pdPASS &&
       rmt_tx_wait_all_done(this->tx_channel_, timeout_ms) == ESP_OK;
   if (!ok) {
-    // A capture that never finished would block the next one. Disabling the channel cancels it.
-    rmt_disable(this->rx_channel_);
-    rmt_enable(this->rx_channel_);
+    // A capture that never finished would block the next one
+    this->cancel_();
     this->report_(false, LOG_STR("RMT capture failed"));
     return false;
   }
@@ -215,7 +238,7 @@ int GPIOOneWireBus::reset_int() {
     return -1;
   }
   auto result = one_wire_rmt::classify_reset(phases, count);
-  this->report_(result != one_wire_rmt::ResetResult::FAULT, LOG_STR("Bus is held low"));
+  this->report_(result != one_wire_rmt::ResetResult::RESET_RESULT_FAULT, LOG_STR("Bus is held low"));
   return static_cast<int>(result);
 }
 
@@ -268,14 +291,10 @@ uint64_t GPIOOneWireBus::search_int() {
                                 slot_count * SLOT_US, phases, count))
         return false;
       uint64_t bits;
-      bool ok = one_wire_rmt::decode_bits(phases, count, bits) == slot_count;
+      size_t pulses = one_wire_rmt::decode_bits(phases, count, bits);
+      bool ok = one_wire_rmt::split_search_bits(bits, pulses, write_first, id_bit, cmp_id_bit);
       this->bus->report_(ok, LOG_STR("RMT capture incomplete"));
-      if (!ok)
-        return false;
-      bits >>= write_first ? 1 : 0;  // the first pulse is the one written
-      id_bit = bits & 1;
-      cmp_id_bit = (bits >> 1) & 1;
-      return true;
+      return ok;
     }
 
     bool write_bit(bool bit) { return this->bus->write_bit_(bit); }

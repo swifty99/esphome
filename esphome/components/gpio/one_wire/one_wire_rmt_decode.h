@@ -72,9 +72,9 @@ inline size_t decode_bits(const Phase *phases, size_t count, uint64_t &bits) {
 }
 
 enum class ResetResult : int8_t {
-  FAULT = -1,     ///< no usable reset pulse, or the bus is held low
-  NO_DEVICE = 0,  ///< the bus came back high and nobody answered
-  PRESENT = 1,    ///< at least one device sent a presence pulse
+  RESET_RESULT_FAULT = -1,     ///< no usable reset pulse, or the bus is held low
+  RESET_RESULT_NO_DEVICE = 0,  ///< the bus came back high and nobody answered
+  RESET_RESULT_PRESENT = 1,    ///< at least one device sent a presence pulse
 };
 
 inline ResetResult classify_reset(const Phase *phases, size_t count) {
@@ -82,12 +82,25 @@ inline ResetResult classify_reset(const Phase *phases, size_t count) {
   while (i < count && phases[i].level != 0)
     i++;
   if (i == count || phases[i].duration > RESET_STUCK_US)
-    return ResetResult::FAULT;
+    return ResetResult::RESET_RESULT_FAULT;
   // After the reset pulse the bus is released (high), then a device pulls it low for the presence pulse
   if (i + 2 < count && phases[i + 1].duration <= PRESENCE_WAIT_MAX_US && phases[i + 2].level == 0 &&
       phases[i + 2].duration >= PRESENCE_LOW_MIN_US)
-    return ResetResult::PRESENT;
-  return ResetResult::NO_DEVICE;
+    return ResetResult::RESET_RESULT_PRESENT;
+  return ResetResult::RESET_RESULT_NO_DEVICE;
+}
+
+/// Split the pulses of a search step into the address bit and its complement. The step is an optional write slot,
+/// followed by two read slots. `bits` is the output of decode_bits(), `pulses` its return value.
+inline bool split_search_bits(uint64_t bits, size_t pulses, bool write_first, bool &id_bit, bool &cmp_id_bit) {
+  size_t expected = write_first ? 3 : 2;
+  if (pulses != expected)
+    return false;
+  if (write_first)
+    bits >>= 1;  // the first pulse is the one that was written
+  id_bit = (bits & 1) != 0;
+  cmp_id_bit = (bits & 2) != 0;
+  return true;
 }
 
 /// Find the next device on the bus, with the algorithm from Maxim application note 187.

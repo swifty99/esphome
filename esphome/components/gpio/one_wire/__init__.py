@@ -1,12 +1,19 @@
 import logging
 
-from esphome import pins
+from esphome import final_validate as fv, pins
 import esphome.codegen as cg
 from esphome.components import esp32, esp32_rmt
 from esphome.components.one_wire import OneWireBus
 from esphome.config_helpers import filter_source_files_from_platform
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_NUMBER, CONF_PIN, PlatformFramework
+from esphome.const import (
+    CONF_ID,
+    CONF_INVERTED,
+    CONF_NUMBER,
+    CONF_PIN,
+    CONF_PLATFORM,
+    PlatformFramework,
+)
 from esphome.types import ConfigType
 
 from .. import gpio_ns
@@ -23,6 +30,8 @@ GPIOOneWireBus = gpio_ns.class_("GPIOOneWireBus", OneWireBus, cg.Component)
 def validate_use_rmt(config: ConfigType) -> ConfigType:
     if config[CONF_USE_RMT]:
         cv.only_on_esp32(config[CONF_USE_RMT])
+        if config.get(CONF_PIN, {}).get(CONF_INVERTED):
+            raise cv.Invalid(f"'{CONF_USE_RMT}' does not support an inverted pin")
         if esp32.get_esp32_variant() in esp32_rmt.VARIANTS_NO_RMT:
             raise cv.Invalid(
                 f"'{CONF_USE_RMT}' is not available on {esp32.get_esp32_variant()} "
@@ -41,6 +50,23 @@ CONFIG_SCHEMA = cv.All(
     ).extend(cv.COMPONENT_SCHEMA),
     validate_use_rmt,
 )
+
+
+def final_validate(config: ConfigType) -> ConfigType:
+    # The RMT code is compiled for all GPIO buses or for none
+    buses = [
+        bus
+        for bus in fv.full_config.get().get("one_wire", [])
+        if bus[CONF_PLATFORM] == "gpio"
+    ]
+    if len({bus[CONF_USE_RMT] for bus in buses}) > 1:
+        raise cv.Invalid(
+            f"All GPIO 1-wire buses must have the same '{CONF_USE_RMT}' setting"
+        )
+    return config
+
+
+FINAL_VALIDATE_SCHEMA = final_validate
 
 
 async def to_code(config: ConfigType) -> None:

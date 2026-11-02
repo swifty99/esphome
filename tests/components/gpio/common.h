@@ -52,11 +52,14 @@ class SimulatedBus {
   }
 
   bool write_bit(bool bit) {
+    if (this->fail_write_ && this->position_ == 63)
+      return false;
     std::erase_if(this->active_, [&](uint64_t device) { return ((device >> this->position_) & 1) != bit; });
     this->position_++;
     return true;
   }
 
+  bool fail_write_{false};
   int fail_at_step_{-1};
   int steps_{0};
 

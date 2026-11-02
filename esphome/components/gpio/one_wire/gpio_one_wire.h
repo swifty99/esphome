@@ -50,6 +50,7 @@ class GPIOOneWireBus final : public one_wire::OneWireBus, public Component {
                  one_wire_rmt::Phase *phases, size_t &phase_count);
   bool write_bit_(bool bit);
   void report_(bool ok, const LogString *reason);
+  void cancel_();
   void destroy_();
 
   rmt_channel_handle_t tx_channel_{nullptr};
@@ -58,6 +59,7 @@ class GPIOOneWireBus final : public one_wire::OneWireBus, public Component {
   rmt_encoder_handle_t copy_encoder_{nullptr};
   rmt_symbol_word_t *rx_symbols_{nullptr};
   QueueHandle_t rx_queue_{nullptr};
+  bool transfer_failed_{false};
 #else
   ISRInternalGPIOPin pin_;
   void write_bit_(bool bit);

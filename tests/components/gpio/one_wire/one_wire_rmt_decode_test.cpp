@@ -70,33 +70,58 @@ TEST(OneWireRmtDecodeBits, DecodesNoMoreThan64Pulses) {
   EXPECT_EQ(bits, ~uint64_t(0));
 }
 
+TEST(OneWireRmtSearchBits, SplitsTheReadSlotsOfASearchStep) {
+  bool id_bit, cmp_id_bit;
+  // Two read slots: the first pulse is the address bit, the second its complement
+  EXPECT_TRUE(split_search_bits(0b01, 2, false, id_bit, cmp_id_bit));
+  EXPECT_TRUE(id_bit);
+  EXPECT_FALSE(cmp_id_bit);
+  EXPECT_TRUE(split_search_bits(0b10, 2, false, id_bit, cmp_id_bit));
+  EXPECT_FALSE(id_bit);
+  EXPECT_TRUE(cmp_id_bit);
+  // With a write slot in front, its pulse is skipped, whatever it decoded to
+  EXPECT_TRUE(split_search_bits(0b101, 3, true, id_bit, cmp_id_bit));
+  EXPECT_FALSE(id_bit);
+  EXPECT_TRUE(cmp_id_bit);
+  EXPECT_TRUE(split_search_bits(0b010, 3, true, id_bit, cmp_id_bit));
+  EXPECT_TRUE(id_bit);
+  EXPECT_FALSE(cmp_id_bit);
+}
+
+TEST(OneWireRmtSearchBits, RejectsAnIncompleteCapture) {
+  bool id_bit, cmp_id_bit;
+  EXPECT_FALSE(split_search_bits(0, 1, false, id_bit, cmp_id_bit));
+  EXPECT_FALSE(split_search_bits(0, 2, true, id_bit, cmp_id_bit));
+  EXPECT_FALSE(split_search_bits(0, 3, false, id_bit, cmp_id_bit));
+}
+
 TEST(OneWireRmtReset, DetectsPresence) {
   // reset pulse, 40 µs of waiting, 120 µs presence pulse, then idle
   auto phases = phases_of({{480, 0, 40, 1}, {120, 0, 300, 1}});
-  EXPECT_EQ(classify_reset(phases.data(), phases.size()), ResetResult::PRESENT);
+  EXPECT_EQ(classify_reset(phases.data(), phases.size()), ResetResult::RESET_RESULT_PRESENT);
 }
 
 TEST(OneWireRmtReset, NoDeviceWhenTheBusStaysHigh) {
   auto phases = phases_of({{480, 0, 600, 1}});
-  EXPECT_EQ(classify_reset(phases.data(), phases.size()), ResetResult::NO_DEVICE);
+  EXPECT_EQ(classify_reset(phases.data(), phases.size()), ResetResult::RESET_RESULT_NO_DEVICE);
 }
 
 TEST(OneWireRmtReset, ShortOrLateLowPulsesAreNoPresence) {
   auto too_short = phases_of({{480, 0, 40, 1}, {PRESENCE_LOW_MIN_US - 1, 0, 300, 1}});
-  EXPECT_EQ(classify_reset(too_short.data(), too_short.size()), ResetResult::NO_DEVICE);
+  EXPECT_EQ(classify_reset(too_short.data(), too_short.size()), ResetResult::RESET_RESULT_NO_DEVICE);
   auto too_late = phases_of({{480, 0, PRESENCE_WAIT_MAX_US + 1, 1}, {100, 0, 300, 1}});
-  EXPECT_EQ(classify_reset(too_late.data(), too_late.size()), ResetResult::NO_DEVICE);
+  EXPECT_EQ(classify_reset(too_late.data(), too_late.size()), ResetResult::RESET_RESULT_NO_DEVICE);
 }
 
 TEST(OneWireRmtReset, ABusThatIsHeldLowIsAFault) {
   auto stuck = phases_of({{600, 0, 0, 1}});
-  EXPECT_EQ(classify_reset(stuck.data(), stuck.size()), ResetResult::FAULT);
+  EXPECT_EQ(classify_reset(stuck.data(), stuck.size()), ResetResult::RESET_RESULT_FAULT);
 }
 
 TEST(OneWireRmtReset, NoLowPulseAtAllIsAFault) {
   auto none = phases_of({{600, 1, 0, 0}});
-  EXPECT_EQ(classify_reset(none.data(), none.size()), ResetResult::FAULT);
-  EXPECT_EQ(classify_reset(nullptr, 0), ResetResult::FAULT);
+  EXPECT_EQ(classify_reset(none.data(), none.size()), ResetResult::RESET_RESULT_FAULT);
+  EXPECT_EQ(classify_reset(nullptr, 0), ResetResult::RESET_RESULT_FAULT);
 }
 
 TEST(OneWireRmtSearch, FindsNothingOnAnEmptyBus) { EXPECT_TRUE(enumerate({}).empty()); }
@@ -143,6 +168,17 @@ TEST(OneWireRmtSearch, ABusFailureEndsTheSearchWithoutChangingTheState) {
   uint64_t address = 0;
   EXPECT_EQ(search_next(bus, last_discrepancy, last_device_flag, address), 0u);
   EXPECT_EQ(last_discrepancy, 0);
+  EXPECT_FALSE(last_device_flag);
+  EXPECT_EQ(address, 0u);
+}
+
+TEST(OneWireRmtSearch, AFailureWhileAnnouncingTheLastBitEndsTheSearch) {
+  SimulatedBus bus({0x28});
+  bus.fail_write_ = true;
+  uint8_t last_discrepancy = 0;
+  bool last_device_flag = false;
+  uint64_t address = 0;
+  EXPECT_EQ(search_next(bus, last_discrepancy, last_device_flag, address), 0u);
   EXPECT_FALSE(last_device_flag);
   EXPECT_EQ(address, 0u);
 }
