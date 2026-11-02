@@ -392,7 +392,7 @@ TEST(RmtOneWireEngine, NoHeapInBlockingMethods) {
   EXPECT_EQ(g_heap_allocs, 0u);
 }
 
-// ---- set_loop_active -------------------------------------------------------------------------
+// ---- Rule 8: the loop runs until is_idle() ------------------------------------------------------
 
 TEST(RmtOneWireEngine, LoopActiveFromSubmitUntilTheFifoIsEmpty) {
   Rig rig;
@@ -407,19 +407,7 @@ TEST(RmtOneWireEngine, LoopActiveFromSubmitUntilTheFifoIsEmpty) {
   EXPECT_TRUE(rig.port.loop_active());
   rig.pump();
   EXPECT_EQ(log.size(), 2u);
-  EXPECT_EQ(rig.port.loop_history, (std::vector<bool>{true, false}));
-}
-
-TEST(RmtOneWireEngine, LoopHistoryRepeatsPerBurst) {
-  Rig rig;
-  add_scratchpad_device(rig);
-  DoneLog log;
-  Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
-  ASSERT_TRUE(rig.engine.submit(&job.t));
-  rig.pump();
-  ASSERT_TRUE(rig.engine.submit(&job.t));
-  rig.pump();
-  EXPECT_EQ(rig.port.loop_history, (std::vector<bool>{true, false, true, false}));
+  EXPECT_FALSE(rig.port.loop_active());
 }
 
 TEST(RmtOneWireEngine, LoopStopsAfterEveryErrorEnd) {
@@ -429,7 +417,7 @@ TEST(RmtOneWireEngine, LoopStopsAfterEveryErrorEnd) {
   ASSERT_TRUE(rig.engine.submit(&job.t));
   rig.pump();
   EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::NO_PRESENCE}}));
-  EXPECT_EQ(rig.port.loop_history, (std::vector<bool>{true, false}));
+  EXPECT_FALSE(rig.port.loop_active());
 }
 
 TEST(RmtOneWireEngine, LoopOffAfterBlockingMethods) {
@@ -475,6 +463,98 @@ TEST(RmtOneWireEngine, Rule2_CompletionsTouchNothingButFlags) {
     rig.engine.poll();
   }
   EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::OK}}));
+}
+
+namespace {
+
+/// Completes the sections before target through SimPort, target is running afterwards.
+void run_to_section(Rig &rig, const DoneLog &log, Job &job, size_t target) {
+  rig.port.manual = true;
+  add_scratchpad_device(rig);
+  ASSERT_TRUE(rig.engine.submit(&job.t));
+  rig.engine.poll();
+  ASSERT_EQ(rig.port.sections.size(), 1u);
+  for (int guard = 0; guard < 20 && rig.port.sections.size() <= target; guard++) {
+    rig.port.fire_tx();
+    if (rig.port.sections.back().armed)
+      rig.port.fire_rx();
+    rig.engine.poll();
+  }
+  ASSERT_EQ(rig.port.sections.size(), target + 1);
+  ASSERT_TRUE(log.empty());
+}
+
+}  // namespace
+
+TEST(RmtOneWireEngine, Rule2_CompletionsReportTheLastExpectedEvent) {
+  // The events under test come straight from here, SimPort ignores the result. The main loop does
+  // not run after them, so the receive buffer does not matter.
+  // RESET (section 0) and the first READ (section 3): both orders
+  for (size_t target : {size_t{0}, size_t{3}}) {
+    for (bool rx_first : {false, true}) {
+      SCOPED_TRACE(target);
+      Rig rig;
+      DoneLog log;
+      Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+      ASSERT_NO_FATAL_FAILURE(run_to_section(rig, log, job, target));
+      ASSERT_TRUE(rig.port.sections.back().armed);
+      if (rx_first) {
+        EXPECT_FALSE(rig.engine.on_rx_done(1));
+        EXPECT_TRUE(rig.engine.on_tx_done());
+      } else {
+        EXPECT_FALSE(rig.engine.on_tx_done());
+        EXPECT_TRUE(rig.engine.on_rx_done(1));
+      }
+    }
+  }
+
+  // WRITE: TX is the only event
+  {
+    Rig rig;
+    DoneLog log;
+    Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+    ASSERT_NO_FATAL_FAILURE(run_to_section(rig, log, job, 1));
+    ASSERT_FALSE(rig.port.sections.back().armed);
+    EXPECT_TRUE(rig.engine.on_tx_done());
+  }
+
+  // IDLE
+  {
+    Rig rig;
+    EXPECT_FALSE(rig.engine.on_tx_done());
+    EXPECT_FALSE(rig.engine.on_rx_done(1));
+  }
+
+  // Inside abort(), in the on_done behind it, and idle after it
+  for (bool queued : {false, true}) {
+    SCOPED_TRACE(queued);
+    Rig rig;
+    add_scratchpad_device(rig);
+    rig.port.manual = true;
+    DoneLog log;
+    Job lost(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+    Job next(&log, 2, ROM_A, {READ_SCRATCHPAD}, 9);
+    const auto expect_no_wake = [&] {
+      EXPECT_FALSE(rig.engine.on_tx_done());
+      EXPECT_FALSE(rig.engine.on_rx_done(1));
+    };
+    rig.port.on_abort = expect_no_wake;
+    lost.then = [&](TransactionStatus) { expect_no_wake(); };
+    ASSERT_TRUE(rig.engine.submit(&lost.t));
+    if (queued) {
+      ASSERT_TRUE(rig.engine.submit(&next.t));
+    }
+    rig.engine.poll();
+    ASSERT_EQ(rig.port.sections.size(), 1u);
+    rig.port.advance_us(60 * MS);
+    rig.engine.poll();
+    ASSERT_EQ(rig.port.abort_count, 1);
+    ASSERT_EQ(log.size(), 1u);
+    if (!queued) {
+      ASSERT_TRUE(rig.engine.is_idle());
+      expect_no_wake();
+    }
+  }
 }
 
 // ---- I7: FIFO, atomic on the bus -------------------------------------------------------------
@@ -987,18 +1067,29 @@ TEST(RmtOneWireEngine, Errors_BadReadCaptureStopsTheTransaction) {
 }
 
 TEST(RmtOneWireEngine, Errors_LineToGndDuringReadIsCaptureError) {
-  Rig rig;
-  add_scratchpad_device(rig);
-  rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
-    if (section == 3)
-      capture = {Symbol{100, 0, 0, 0}};
-  };
-  DoneLog log;
-  Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
-  ASSERT_TRUE(rig.engine.submit(&job.t));
-  rig.pump();
-  EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::CAPTURE_ERROR}}));
-  EXPECT_EQ(rig.port.sections.size(), 4u);
+  // {100, 0, 0, 0} does not occur on the S3. The measured form is S2 of the probe, n = 3: two valid
+  // slots, then the line stays Low.
+  for (bool measured : {false, true}) {
+    SCOPED_TRACE(measured);
+    Rig rig;
+    add_scratchpad_device(rig);
+    rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
+      if (section != 3)
+        return;
+      if (measured) {
+        capture.resize(2);
+        capture.push_back(Symbol{0, 0, STALE_DURATION1, 1});
+      } else {
+        capture = {Symbol{100, 0, 0, 0}};
+      }
+    };
+    DoneLog log;
+    Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+    ASSERT_TRUE(rig.engine.submit(&job.t));
+    rig.pump();
+    EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::CAPTURE_ERROR}}));
+    EXPECT_EQ(rig.port.sections.size(), 4u);
+  }
 }
 
 TEST(RmtOneWireEngine, Errors_LineToGndInTheLastSlotIsCaptureError) {

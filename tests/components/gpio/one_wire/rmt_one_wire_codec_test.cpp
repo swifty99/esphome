@@ -175,7 +175,7 @@ TEST(RmtOneWireCodec, EncodeReadWritesExactlyNumBits) {
 struct ResetCase {
   const char *name;
   std::vector<Symbol> capture;
-  ResetResult expected;
+  TransactionStatus expected;
 };
 
 class RmtOneWireDecodeReset : public ::testing::TestWithParam<ResetCase> {};
@@ -190,32 +190,45 @@ TEST_P(RmtOneWireDecodeReset, Result) {
 INSTANTIATE_TEST_SUITE_P(
     I5, RmtOneWireDecodeReset,
     ::testing::Values(
-        ResetCase{"TypicalPresence", {{503, 0, 27, 1}, {120, 0, 0, 1}}, ResetResult::PRESENT},
+        ResetCase{"TypicalPresence", {{503, 0, 27, 1}, {120, 0, 0, 1}}, TransactionStatus::OK},
         ResetCase{
-            "PresenceFollowedByEndMarker", {{503, 0, 27, 1}, {120, 0, 500, 1}, {0, 1, 0, 1}}, ResetResult::PRESENT},
-        ResetCase{"PresenceThenEndsOnLow", {{503, 0, 27, 1}, {120, 0, 500, 1}, {0, 0, 0, 1}}, ResetResult::BUS_LOW},
-        ResetCase{"ShortestPresence", {{503, 0, 27, 1}, {15, 0, 0, 1}}, ResetResult::PRESENT},
-        ResetCase{"TooShortForPresence", {{503, 0, 27, 1}, {14, 0, 0, 1}}, ResetResult::NO_DEVICE},
-        ResetCase{"LatestPresence", {{503, 0, 300, 1}, {60, 0, 0, 1}}, ResetResult::PRESENT},
-        ResetCase{"TooLateForPresence", {{503, 0, 301, 1}, {60, 0, 0, 1}}, ResetResult::NO_DEVICE},
-        ResetCase{"GlitchThenPresence", {{503, 0, 20, 1}, {5, 0, 30, 1}, {100, 0, 0, 1}}, ResetResult::PRESENT},
+            "PresenceFollowedByEndMarker", {{503, 0, 27, 1}, {120, 0, 500, 1}, {0, 1, 0, 1}}, TransactionStatus::OK},
+        ResetCase{
+            "PresenceThenEndsOnLow", {{503, 0, 27, 1}, {120, 0, 500, 1}, {0, 0, 0, 1}}, TransactionStatus::BUS_LOW},
+        ResetCase{"ShortestPresence", {{503, 0, 27, 1}, {15, 0, 0, 1}}, TransactionStatus::OK},
+        ResetCase{"TooShortForPresence", {{503, 0, 27, 1}, {14, 0, 0, 1}}, TransactionStatus::NO_PRESENCE},
+        ResetCase{"LatestPresence", {{503, 0, 300, 1}, {60, 0, 0, 1}}, TransactionStatus::OK},
+        ResetCase{"TooLateForPresence", {{503, 0, 301, 1}, {60, 0, 0, 1}}, TransactionStatus::NO_PRESENCE},
+        ResetCase{"GlitchThenPresence", {{503, 0, 20, 1}, {5, 0, 30, 1}, {100, 0, 0, 1}}, TransactionStatus::OK},
         // The presence begins 355 us after the release: 250 + 5 + 100
-        ResetCase{"GlitchThenTooLate", {{503, 0, 250, 1}, {5, 0, 100, 1}, {60, 0, 0, 1}}, ResetResult::NO_DEVICE},
-        ResetCase{"NoDevice", {{503, 0, 0, 1}}, ResetResult::NO_DEVICE},
-        ResetCase{"LongestOwnPulseIsNoHang", {{599, 0, 0, 1}}, ResetResult::NO_DEVICE},
-        ResetCase{"FirstLowAtHangLimit", {{600, 0, 0, 1}}, ResetResult::BUS_LOW},
-        ResetCase{"HeldLowUntilIdle", {{600, 0, 0, 0}}, ResetResult::BUS_LOW},
-        ResetCase{"HeldLowLongNumbers", {{32767, 0, 0, 0}}, ResetResult::BUS_LOW},
-        ResetCase{"EndsOnLowAfterLongPulse", {{503, 0, 27, 1}, {600, 0, 0, 0}}, ResetResult::BUS_LOW},
-        ResetCase{"EndsOnShortLow", {{503, 0, 27, 1}, {120, 0, 0, 0}}, ResetResult::BUS_LOW},
-        ResetCase{"EndsOnLowZeroDuration", {{503, 0, 27, 1}, {0, 0, 0, 0}}, ResetResult::BUS_LOW},
+        ResetCase{
+            "GlitchThenTooLate", {{503, 0, 250, 1}, {5, 0, 100, 1}, {60, 0, 0, 1}}, TransactionStatus::NO_PRESENCE},
+        ResetCase{"NoDevice", {{503, 0, 0, 1}}, TransactionStatus::NO_PRESENCE},
+        ResetCase{"LongestOwnPulseIsNoHang", {{599, 0, 0, 1}}, TransactionStatus::NO_PRESENCE},
+        ResetCase{"FirstLowAtHangLimit", {{600, 0, 0, 1}}, TransactionStatus::BUS_LOW},
+        ResetCase{"HeldLowUntilIdle", {{600, 0, 0, 0}}, TransactionStatus::BUS_LOW},
+        ResetCase{"HeldLowLongNumbers", {{32767, 0, 0, 0}}, TransactionStatus::BUS_LOW},
+        ResetCase{"EndsOnLowAfterLongPulse", {{503, 0, 27, 1}, {600, 0, 0, 0}}, TransactionStatus::BUS_LOW},
+        ResetCase{"EndsOnShortLow", {{503, 0, 27, 1}, {120, 0, 0, 0}}, TransactionStatus::BUS_LOW},
+        ResetCase{"EndsOnLowZeroDuration", {{503, 0, 27, 1}, {0, 0, 0, 0}}, TransactionStatus::BUS_LOW},
         // Section 7 point 4, as the S3 stores it: duration1 is not a time and is never evaluated
-        ResetCase{"OnlySymbolEndsOnLowStale74", {{0, 0, 74, 1}}, ResetResult::BUS_LOW},
-        ResetCase{"OnlySymbolEndsOnLowStale75", {{0, 0, 75, 1}}, ResetResult::BUS_LOW},
-        ResetCase{"OnlySymbolEndsOnLowStale0", {{0, 0, 0, 1}}, ResetResult::BUS_LOW},
-        ResetCase{"ResetThenEndsOnLowStale91", {{503, 0, 27, 1}, {0, 0, 91, 1}}, ResetResult::BUS_LOW},
-        ResetCase{"EmptyCapture", {}, ResetResult::CAPTURE_ERROR},
-        ResetCase{"StartsHigh", {{503, 1, 27, 0}, {120, 1, 0, 0}}, ResetResult::CAPTURE_ERROR}),
+        ResetCase{"OnlySymbolEndsOnLowStale74", {{0, 0, 74, 1}}, TransactionStatus::BUS_LOW},
+        ResetCase{"OnlySymbolEndsOnLowStale75", {{0, 0, 75, 1}}, TransactionStatus::BUS_LOW},
+        ResetCase{"OnlySymbolEndsOnLowStale0", {{0, 0, 0, 1}}, TransactionStatus::BUS_LOW},
+        ResetCase{"ResetThenEndsOnLowStale91", {{503, 0, 27, 1}, {0, 0, 91, 1}}, TransactionStatus::BUS_LOW},
+        ResetCase{"EmptyCapture", {}, TransactionStatus::CAPTURE_ERROR},
+        ResetCase{"StartsHigh", {{503, 1, 27, 0}, {120, 1, 0, 0}}, TransactionStatus::CAPTURE_ERROR},
+        // Section 7: only T+ M* and T* L are allowed, a form error goes before BUS_LOW
+        ResetCase{"OnlyEndMarker", {{0, 1, 0, 1}}, TransactionStatus::CAPTURE_ERROR},
+        ResetCase{
+            "EndsOnLowThenMarker", {{503, 0, 27, 1}, {0, 0, 74, 1}, {0, 1, 0, 1}}, TransactionStatus::CAPTURE_ERROR},
+        ResetCase{"EndsOnLowThenPresence",
+                  {{503, 0, 27, 1}, {0, 0, 74, 1}, {120, 0, 0, 1}},
+                  TransactionStatus::CAPTURE_ERROR},
+        ResetCase{
+            "MarkerThenPresence", {{503, 0, 27, 1}, {0, 1, 0, 1}, {120, 0, 0, 1}}, TransactionStatus::CAPTURE_ERROR},
+        ResetCase{"SecondHalfLowInTheMiddle", {{503, 0, 27, 0}, {120, 0, 0, 1}}, TransactionStatus::CAPTURE_ERROR},
+        ResetCase{"LaterSymbolStartsHighEndsLow", {{503, 0, 27, 1}, {120, 1, 0, 0}}, TransactionStatus::CAPTURE_ERROR}),
     [](const ::testing::TestParamInfo<ResetCase> &info) { return info.param.name; });
 
 // ---- decode_read_slots, section 4.3 and section 7 --------------------------------------------
@@ -326,9 +339,12 @@ TEST(RmtOneWireCodec, I5_LowTimeMustBeShorterThanASlot) {
 TEST(RmtOneWireCodec, I5_LowInTheSecondHalfOfASymbolCountsToo) {
   auto capture = capture_of({true, true, true});
   uint8_t out = 0;
-  capture[1].duration1 = 80;
   capture[1].level1 = 0;
-  EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), 3, &out, 0));
+  // 76 is below a slot: point 3 only looks at duration0, point 2 rejects level1 == 0 at any position
+  for (uint16_t duration : {uint16_t{80}, uint16_t{76}}) {
+    capture[1].duration1 = duration;
+    EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), 3, &out, 0)) << duration;
+  }
 }
 
 TEST(RmtOneWireCodec, I5_CaptureEndingOnLowIsInvalid) {
@@ -384,7 +400,7 @@ TEST(RmtOneWireCodec, I5_EndMarkerDoesNotReplaceAMissingSlot) {
   // otherwise a missing 0 would read as a 1 and the capture would pass.
   std::vector<Symbol> capture{read_slot(false), read_slot(false)};
   std::array<uint8_t, 2> out{};
-  for (const Symbol &marker : {Symbol{0, 0, 0, 0}, Symbol{0, 0, 0, 1}}) {
+  for (const Symbol &marker : {Symbol{0, 0, 0, 0}, Symbol{0, 0, 0, 1}, Symbol{0, 1, 0, 1}}) {
     capture.resize(2);
     capture.push_back(marker);
     EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), 3, out.data(), 0));
@@ -405,7 +421,8 @@ TEST(RmtOneWireCodec, I5_WrongLevelAnywhereIsInvalid) {
 TEST(RmtOneWireCodec, I5_SurplusSymbolsWithDurationAreInvalid) {
   const std::vector<bool> bits{true, false, true};
   std::array<uint8_t, 2> out{};
-  for (const Symbol &surplus : {Symbol{4, 0, 76, 1}, Symbol{1, 0, 0, 1}, Symbol{0, 0, 1, 1}, Symbol{1, 1, 0, 0}}) {
+  for (const Symbol &surplus : {Symbol{4, 0, 76, 1}, Symbol{1, 0, 0, 1}, Symbol{0, 0, 1, 1}, Symbol{1, 1, 0, 0},
+                                Symbol{0, 1, 1, 1}, Symbol{0, 1, 0, 0}}) {
     auto capture = capture_of(bits);
     capture.push_back(surplus);
     EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), out.data(), 0))

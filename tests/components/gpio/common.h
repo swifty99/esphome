@@ -441,14 +441,13 @@ class SimPort : public Port {
   // ---- Recorded ----
   std::vector<Section> sections;
   std::vector<PortCall> calls;
-  std::vector<bool> loop_history;  ///< Changes of the requested loop state, initial state is off
   int arm_count{0};
   int tx_count{0};
   int abort_count{0};
   int wait_calls{0};
   int isr_violations{0};  ///< Port methods called from inside on_tx_done() or on_rx_done()
   int double_arms{0};     ///< arm_rx() while RX was still armed, it fails like the real driver
-  bool loop_active() const { return this->loop_active_; }
+  bool loop_active() const { return !this->engine_->is_idle(); }
 
   // ---- Port ----
   bool line_is_high() override {
@@ -578,14 +577,6 @@ class SimPort : public Port {
     }
   }
 
-  void set_loop_active(bool active) override {
-    HeapPause pause;
-    this->note_main_call_();
-    if (active != this->loop_active_)
-      this->loop_history.push_back(active);
-    this->loop_active_ = active;
-  }
-
   // ---- Driving the simulation, called from test code ----
   uint64_t now_us() const { return this->now_us_; }
 
@@ -703,7 +694,6 @@ class SimPort : public Port {
   bool tx_outstanding_{false};
   bool rx_outstanding_{false};
   size_t current_section_{0};
-  bool loop_active_{false};
   bool in_isr_{false};
   bool spurious_toggle_{false};
   uint32_t spin_{0};

@@ -22,10 +22,8 @@ class Port {
   /// Stops both channels; no further completion belongs to the aborted section. False: hardware error.
   virtual bool abort() = 0;
   virtual uint32_t now_ms() = 0;
-  /// Sleeps until a completion or at most max_ms. Only used by the blocking methods.
+  /// Sleeps, at most max_ms; may return early. Only used by the blocking methods, which then check the flags.
   virtual void wait_for_event(uint32_t max_ms) = 0;
-  /// Asks the component to keep calling poll(), or to stop calling it.
-  virtual void set_loop_active(bool active) = 0;
 };
 
 class Engine {
@@ -39,9 +37,9 @@ class Engine {
   bool is_idle() const;
   void set_failed();  ///< All pending and future work ends in HARDWARE_ERROR
 
-  // ISR safe: store and return
-  void on_tx_done();
-  void on_rx_done(size_t num_symbols);
+  // ISR safe: store and return. True if this was the last expected event of the section: wake the main loop.
+  bool on_tx_done();
+  bool on_rx_done(size_t num_symbols);
 
   // Blocking facade; each drains the FIFO first, sleeps through Port::wait_for_event
   int reset_blocking();  ///< -1 bus low or failure, 0 no device, 1 present
