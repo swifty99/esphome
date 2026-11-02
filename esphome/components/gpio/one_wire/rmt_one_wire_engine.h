@@ -4,6 +4,7 @@
 
 #ifdef USE_ONE_WIRE_RMT
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -34,7 +35,7 @@ class Engine {
   // Main loop only
   bool submit(one_wire::Transaction *transaction);
   void poll();
-  bool is_idle() const;
+  bool is_idle() const { return this->head_ == nullptr; }
   void set_failed();  ///< All pending and future work ends in HARDWARE_ERROR
 
   // ISR safe: store and return. True if this was the last expected event of the section: wake the main loop.
@@ -49,6 +50,55 @@ class Engine {
   bool read_blocking(uint8_t *data, size_t num_bits);
   void reset_search();
   uint64_t search_next();  ///< Same contract as OneWireBus::search_int(): 0 when finished or on failure
+
+ protected:
+  /// Where the transaction at the head of the FIFO stands.
+  enum class Step : uint8_t { LINE_UNCHECKED, LINE_LOW, RESET, WRITE, READ };
+
+  static constexpr size_t MAX_MEM_WORDS = 64;  // ESP32 and S2, the others have 48
+  static constexpr uint32_t PENDING_TX = 1;
+  static constexpr uint32_t PENDING_RX = 2;
+
+  void start_reset_();
+  void section_done_();
+  void finish_(one_wire::TransactionStatus status);
+  /// Sends tx_[0, count), with RX unless idle_us is NO_RX. False: hardware error, nothing is running.
+  bool start_section_(size_t count, uint32_t idle_us);
+  /// False: permanent hardware error, the engine is failed from now on.
+  bool abort_section_();
+
+  void drain_();
+  /// One whole section, sleeping. False on any failure, nothing is running then.
+  bool run_section_(size_t count, uint32_t idle_us);
+
+  Port *port_;
+  size_t mem_words_;
+  Timing timing_;
+  uint32_t rx_idle_us_;
+  bool failed_{false};
+
+  // FIFO, tail_ is only valid while head_ is set
+  one_wire::Transaction *head_{nullptr};
+  one_wire::Transaction *tail_{nullptr};
+
+  Step step_{Step::LINE_UNCHECKED};
+  uint32_t since_ms_{0};  ///< Start of the running section, or when the line was first seen Low
+  uint8_t rom_selection_[9]{};
+  size_t rom_bits_{0};
+  size_t write_pos_{0};   ///< Slots sent of ROM selection + write_data
+  size_t read_pos_{0};    ///< Slots sent of read_data
+  size_t read_slots_{0};  ///< Size of the running READ section
+
+  /// Completions the running section still waits for. Whatever is not expected here is discarded.
+  std::atomic<uint32_t> pending_{0};
+  std::atomic<size_t> rx_count_{0};
+
+  uint64_t search_address_{0};
+  uint8_t last_discrepancy_{0};
+  bool last_device_{false};
+
+  Symbol tx_[MAX_MEM_WORDS];
+  Symbol rx_[MAX_MEM_WORDS];
 };
 
 }  // namespace esphome::gpio::rmt_one_wire
