@@ -27,12 +27,15 @@ std::vector<Symbol> capture_of(const std::vector<bool> &bits) {
   return capture;
 }
 
-/// The decoder rule of section 7, as the test understands it.
+/// The decoder rule of section 7, as the test understands it. Levels of the second half are only
+/// generated as Low for the last symbol, "ends on Low" then means its level1.
 bool capture_is_valid(const std::vector<Symbol> &capture, size_t expected) {
   if (capture.size() < expected)
     return false;
+  if (!capture.empty() && capture.back().level1 == 0)
+    return false;
   for (size_t i = 0; i < expected; i++) {
-    if (capture[i].level0 != 0 || capture[i].duration0 == 0)
+    if (capture[i].level0 != 0 || capture[i].duration0 == 0 || capture[i].duration0 >= 80)
       return false;
   }
   for (size_t i = expected; i < capture.size(); i++) {
@@ -208,7 +211,7 @@ INSTANTIATE_TEST_SUITE_P(
 // ---- decode_read_slots, section 4.3 and section 7 --------------------------------------------
 
 TEST(RmtOneWireCodec, I5_ReadThresholdIs13Microseconds) {
-  for (uint16_t low = 1; low < 70; low++) {
+  for (uint16_t low = 1; low < 80; low++) {
     const Symbol capture{low, 0, 0, 1};
     uint8_t out = low >= 13 ? 0xFF : 0x00;
     ASSERT_TRUE(decode_read_slots(&capture, 1, 1, &out, 0)) << low;
@@ -267,7 +270,7 @@ TEST(RmtOneWireCodec, I5_CompleteCaptureShapesAreAccepted) {
   EXPECT_TRUE(decode_read_slots(full_last.data(), full_last.size(), 3, &out, 0));
   EXPECT_EQ(out, 0b101);
 
-  for (const Symbol &marker : {Symbol{0, 0, 0, 0}, Symbol{0, 0, 0, 1}, Symbol{0, 1, 0, 0}, Symbol{0, 1, 0, 1}}) {
+  for (const Symbol &marker : {Symbol{0, 0, 0, 1}, Symbol{0, 1, 0, 1}}) {
     auto with_marker = full_last;
     with_marker.push_back(marker);
     with_marker.push_back(marker);
@@ -275,6 +278,49 @@ TEST(RmtOneWireCodec, I5_CompleteCaptureShapesAreAccepted) {
     EXPECT_TRUE(decode_read_slots(with_marker.data(), with_marker.size(), 3, &out, 0));
     EXPECT_EQ(out, 0b101);
   }
+}
+
+TEST(RmtOneWireCodec, I5_LowTimeMustBeShorterThanASlot) {
+  // Section 7 point 3, at every position: 79 us is a 0, from 80 us on someone holds the bus
+  const std::vector<bool> bits{true, true, true, true};
+  for (size_t position = 0; position < bits.size(); position++) {
+    auto capture = capture_of(bits);
+    capture[position].duration0 = 79;
+    uint8_t out = 0;
+    ASSERT_TRUE(decode_read_slots(capture.data(), capture.size(), bits.size(), &out, 0)) << "position " << position;
+    EXPECT_EQ(out, 0x0F & ~(1u << position)) << "position " << position;
+
+    for (uint16_t low : {uint16_t{80}, uint16_t{81}, uint16_t{600}, uint16_t{32767}}) {
+      capture[position].duration0 = low;
+      EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), &out, 0))
+          << "position " << position << " low " << low;
+    }
+  }
+}
+
+TEST(RmtOneWireCodec, I5_LowInTheSecondHalfOfASymbolCountsToo) {
+  auto capture = capture_of({true, true, true});
+  uint8_t out = 0;
+  capture[1].duration1 = 80;
+  capture[1].level1 = 0;
+  EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), 3, &out, 0));
+}
+
+TEST(RmtOneWireCodec, I5_CaptureEndingOnLowIsInvalid) {
+  // Section 7 point 4: the line went to GND in the last slot, the count alone would pass
+  const std::vector<bool> bits{true, false, true};
+  uint8_t out = 0;
+  for (const Symbol &last : {Symbol{30, 0, 0, 0}, Symbol{79, 0, 0, 0}, Symbol{100, 0, 0, 0}, Symbol{4, 0, 76, 0}}) {
+    auto capture = capture_of(bits);
+    capture.back() = last;
+    EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), &out, 0)) << last.duration0;
+    // A single slot, also as the only symbol of a section
+    EXPECT_FALSE(decode_read_slots(&last, 1, 1, &out, 0)) << last.duration0;
+  }
+  // The same behind a complete capture: an end marker that stops on Low
+  auto capture = capture_of(bits);
+  capture.push_back(Symbol{0, 0, 0, 0});
+  EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), &out, 0));
 }
 
 TEST(RmtOneWireCodec, I5_ZeroBitsNeedNoSymbols) {
@@ -341,7 +387,7 @@ TEST(RmtOneWireCodec, I5_FuzzMutatedCaptures) {
     for (size_t i = 0; i < count; i++)
       bits.push_back(rng() & 1);
     auto capture = capture_of(bits);
-    switch (rng() % 6) {
+    switch (rng() % 9) {
       case 0:  // complete
         break;
       case 1:  // truncated
@@ -360,6 +406,15 @@ TEST(RmtOneWireCodec, I5_FuzzMutatedCaptures) {
         capture.resize(rng() % capture.size());
         capture.insert(capture.end(), 1 + rng() % 3, Symbol{0, 0, 0, static_cast<uint16_t>(rng() & 1)});
         break;
+      case 6:  // ends on Low
+        capture.back().level1 = 0;
+        break;
+      case 7:  // Low of a whole slot or more
+        capture[rng() % capture.size()].duration0 = 80 + rng() % 200;
+        break;
+      case 8:  // longest allowed Low
+        capture[rng() % capture.size()].duration0 = 79;
+        break;
     }
     const bool valid = capture_is_valid(capture, count);
     std::array<uint8_t, 9> out{};
@@ -373,7 +428,7 @@ TEST(RmtOneWireCodec, I5_FuzzMutatedCaptures) {
     }
     accepted++;
     for (size_t i = 0; i < count; i++)
-      ASSERT_EQ(get_bit(out.data(), i), bits[i]) << "round " << round << " bit " << i;
+      ASSERT_EQ(get_bit(out.data(), i), capture[i].duration0 < 13) << "round " << round << " bit " << i;
   }
   // The fuzz must exercise both outcomes to mean anything
   EXPECT_GT(accepted, 1000);
@@ -386,8 +441,15 @@ TEST(RmtOneWireCodec, I5_FuzzRandomGarbage) {
     const size_t expected = 1 + rng() % 62;
     std::vector<Symbol> capture(rng() % 70);
     for (auto &symbol : capture) {
-      symbol = Symbol{static_cast<uint16_t>(rng() % 4 == 0 ? 0 : rng() % 200), static_cast<uint16_t>(rng() % 8 == 0),
-                      static_cast<uint16_t>(rng() % 4 == 0 ? 0 : rng() % 200), static_cast<uint16_t>(rng() & 1)};
+      const uint32_t low = rng() % 8 == 0 ? rng() % 200 : 1 + rng() % 79;
+      symbol = Symbol{static_cast<uint16_t>(low), static_cast<uint16_t>(rng() % 16 == 0),
+                      static_cast<uint16_t>(rng() % 4 == 0 ? 0 : rng() % 200), 1};
+    }
+    if (!capture.empty()) {
+      capture.back().level1 = rng() & 1;
+      // A marker that starts High and carries Low has no defined meaning in section 7
+      if (capture.back().duration0 == 0 && capture.back().duration1 == 0 && capture.back().level0 == 1)
+        capture.back().level1 = 1;
     }
     std::array<uint8_t, 9> out{};
     const Symbol unused{};

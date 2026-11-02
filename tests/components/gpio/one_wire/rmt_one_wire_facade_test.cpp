@@ -266,14 +266,32 @@ TEST(RmtOneWireFacade, ResetTimeoutIsFailure) {
 TEST(RmtOneWireFacade, ResetPortFailureIsFailure) {
   {
     Rig rig;
+    rig.port.bus.devices.emplace_back(ROM_A);
     rig.port.fail_arm_at = 0;
     EXPECT_EQ(rig.engine.reset_blocking(), -1);
+    EXPECT_EQ(rig.port.abort_count, 0);
+    EXPECT_EQ(rig.engine.reset_blocking(), 1) << "not permanent";
   }
   {
     Rig rig;
+    rig.port.bus.devices.emplace_back(ROM_A);
     rig.port.fail_tx_at = 0;
     EXPECT_EQ(rig.engine.reset_blocking(), -1);
+    EXPECT_EQ(rig.port.abort_count, 1) << "RX was armed";
+    EXPECT_EQ(rig.engine.reset_blocking(), 1) << "not permanent";
   }
+}
+
+TEST(RmtOneWireFacade, ResetFailedStartWhoseAbortFailsIsPermanent) {
+  Rig rig;
+  rig.port.bus.devices.emplace_back(ROM_A);
+  rig.port.fail_tx_at = 0;
+  rig.port.fail_abort = true;
+  EXPECT_EQ(rig.engine.reset_blocking(), -1);
+  const int transmits = rig.port.tx_count;
+  EXPECT_EQ(rig.engine.reset_blocking(), -1);
+  EXPECT_EQ(rig.port.tx_count, transmits) << "no RMT call on a failed bus";
+  EXPECT_EQ(rig.port.abort_count, 1);
 }
 
 // ---- write_blocking ---------------------------------------------------------------------------
@@ -305,6 +323,7 @@ TEST(RmtOneWireFacade, WritePortFailureIsFalse) {
   rig.port.fail_tx_at = 1;  // the second section
   EXPECT_FALSE(rig.engine.write_blocking(data.data(), 320));
   EXPECT_EQ(rig.port.tx_count, 2) << "stops at the failure";
+  EXPECT_EQ(rig.port.abort_count, 0) << "no RX armed in a WRITE";
 }
 
 // ---- read_blocking: all bits 1 on failure -----------------------------------------------------
@@ -340,10 +359,11 @@ struct ReadFailureCase {
   int section;  ///< Which read section of the call fails
 };
 
-/// Bits of a device that only sends zeros: leftovers of a decoded section stay visible.
+/// Bits of a device that only sends zeros: leftovers of a decoded section stay visible. The buffer
+/// is larger than the request and filled with a pattern: only the requested bits may become 1.
 void run_read_failure(const ReadFailureCase &param, size_t bits) {
   Rig rig;
-  const std::vector<uint8_t> zeros(bits / 8, 0x00);
+  const std::vector<uint8_t> zeros(bits / 8 + 1, 0x00);
   rig.port.bus.devices.emplace_back(ROM_A, zeros);
   select_blocking(rig);
   const size_t first = rig.port.sections.size();
@@ -368,10 +388,16 @@ void run_read_failure(const ReadFailureCase &param, size_t bits) {
       rig.port.fail_tx_at = rig.port.tx_count + param.section;
       break;
   }
-  std::vector<uint8_t> data(bits / 8, 0x00);
+  std::vector<uint8_t> data(bits / 8 + 2, 0x5A);
+  std::vector<uint8_t> expected = data;
+  for (size_t bit = 0; bit < bits; bit++)
+    expected[bit / 8] |= 1u << (bit % 8);
   EXPECT_FALSE(rig.engine.read_blocking(data.data(), bits)) << param.name;
-  EXPECT_EQ(data, std::vector<uint8_t>(bits / 8, 0xFF)) << param.name << " " << bits << " bits";
+  EXPECT_EQ(data, expected) << param.name << " " << bits << " bits";
   EXPECT_TRUE(rig.engine.is_idle());
+  const bool stopped_by_abort = param.failure == ReadFailure::TIMEOUT_RX || param.failure == ReadFailure::TIMEOUT_TX ||
+                                param.failure == ReadFailure::TX;
+  EXPECT_EQ(rig.port.abort_count, stopped_by_abort ? 1 : 0) << param.name;
 }
 
 }  // namespace
@@ -396,6 +422,31 @@ TEST_P(RmtOneWireReadFailure, FailureInALaterSectionOverwritesWhatWasDecoded) {
   ReadFailureCase later = GetParam();
   later.section = 2;
   run_read_failure(later, 800);
+}
+
+TEST_P(RmtOneWireReadFailure, PartialByteOnlyRequestedBitsBecomeOnes) {
+  run_read_failure(GetParam(), 3);
+  run_read_failure(GetParam(), 12);
+}
+
+TEST_P(RmtOneWireReadFailure, PartialByteInALaterSection) {
+  ReadFailureCase later = GetParam();
+  later.section = 1;
+  run_read_failure(later, 100);  // 62 + 38 slots
+}
+
+TEST(RmtOneWireFacade, ReadWithTheLineAtGndFailsAtAnyLength) {
+  // Also a single slot, where the count alone would pass with a wrong 0
+  for (size_t bits : {size_t{1}, size_t{8}, size_t{64}}) {
+    Rig rig;
+    rig.port.stuck_low = true;
+    std::vector<uint8_t> data(bits / 8 + 1, 0x00);
+    std::vector<uint8_t> expected = data;
+    for (size_t bit = 0; bit < bits; bit++)
+      expected[bit / 8] |= 1u << (bit % 8);
+    EXPECT_FALSE(rig.engine.read_blocking(data.data(), bits)) << bits;
+    EXPECT_EQ(data, expected) << bits;
+  }
 }
 
 // ---- Facade and FIFO --------------------------------------------------------------------------
@@ -456,6 +507,18 @@ TEST(RmtOneWireFacade, I7_DrainIncludesWhatOnDoneSubmits) {
   EXPECT_EQ(rig.engine.reset_blocking(), 1);
   EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::OK}, {2, TransactionStatus::OK}}));
   EXPECT_EQ(rig.port.summary(), "RESET WRITE:8 RESET WRITE:8 RESET");
+}
+
+TEST(RmtOneWireFacade, I7_DrainWithNullOnDone) {
+  Rig rig;
+  rig.port.bus.devices.emplace_back(ROM_A);
+  DoneLog log;
+  Job silent(&log, 1, 0, {}, 0);
+  silent.t.on_done = nullptr;
+  ASSERT_TRUE(rig.engine.submit(&silent.t));
+  EXPECT_EQ(rig.engine.reset_blocking(), 1);
+  EXPECT_EQ(rig.port.summary(), "RESET WRITE:8 RESET");
+  EXPECT_TRUE(log.empty());
 }
 
 TEST(RmtOneWireFacade, I7_FailingDrainDoesNotStopThePrimitive) {
@@ -554,6 +617,15 @@ TEST(RmtOneWireFacade, FailedBusReturnsImmediately) {
   EXPECT_EQ(rig.port.now_us(), 0u);
 }
 
+TEST(RmtOneWireFacade, FailedBusSetsOnlyTheRequestedBits) {
+  Rig rig;
+  rig.engine.set_failed();
+  uint8_t data[2] = {0x00, 0x00};
+  EXPECT_FALSE(rig.engine.read_blocking(data, 3));
+  EXPECT_EQ(data[0], 0x07);
+  EXPECT_EQ(data[1], 0x00);
+}
+
 TEST(RmtOneWireFacade, FailedAbortMakesTheFacadeFail) {
   Rig rig;
   rig.port.bus.devices.emplace_back(ROM_A);
@@ -571,32 +643,34 @@ TEST(RmtOneWireFacade, FailedAbortMakesTheFacadeFail) {
 class RmtOneWireSearch : public ::testing::TestWithParam<size_t> {};
 
 INSTANTIATE_TEST_SUITE_P(W, RmtOneWireSearch, ::testing::Values(size_t{48}, size_t{64}),
-                         [](const ::testing::TestParamInfo<size_t> &info) { return std::to_string(info.param); });
+                         [](const ::testing::TestParamInfo<size_t> &info) {
+                           return std::to_string(info.param);  // NOLINT
+                         });
 
 TEST_P(RmtOneWireSearch, I8_RandomRomsZeroToFortyDevices) {
   for (size_t count = 0; count <= 40; count++) {
-    SCOPED_TRACE("devices " + std::to_string(count));
+    SCOPED_TRACE("devices " + std::to_string(count));  // NOLINT
     expect_search_matches_upstream(random_roms(count, static_cast<uint32_t>(count) + 100), GetParam());
   }
 }
 
 TEST_P(RmtOneWireSearch, I8_CountingRomsLowDiscrepancies) {
   for (size_t count = 1; count <= 40; count += 3) {
-    SCOPED_TRACE("devices " + std::to_string(count));
+    SCOPED_TRACE("devices " + std::to_string(count));  // NOLINT
     expect_search_matches_upstream(counting_low_roms(count), GetParam());
   }
 }
 
 TEST_P(RmtOneWireSearch, I8_CountingRomsHighDiscrepancies) {
   for (size_t count = 1; count <= 40; count += 3) {
-    SCOPED_TRACE("devices " + std::to_string(count));
+    SCOPED_TRACE("devices " + std::to_string(count));  // NOLINT
     expect_search_matches_upstream(counting_high_roms(count), GetParam());
   }
 }
 
 TEST_P(RmtOneWireSearch, I8_PairsThatDifferInOneBit) {
   for (size_t count = 2; count <= 40; count += 2) {
-    SCOPED_TRACE("devices " + std::to_string(count));
+    SCOPED_TRACE("devices " + std::to_string(count));  // NOLINT
     expect_search_matches_upstream(single_bit_pairs(count), GetParam());
   }
 }
@@ -654,8 +728,8 @@ TEST(RmtOneWireSearchContract, I8_ResetSearchStartsOver) {
   EXPECT_EQ(search_all(rig), expected);
 }
 
-TEST(RmtOneWireSearchContract, I4_SearchSectionsAreThreeSlotsWithRx) {
-  // Section 4.2: previous branch bit (if any), bit, complement. 64 x 3 slots in total.
+TEST(RmtOneWireSearchContract, I4_SearchIsTwoThenThreeSlotsThenClosingWrite) {
+  // Section 4.2: SEARCH with 2 slots, 63 x SEARCH with 3 slots, closing WRITE with the last branch.
   for (size_t mem_words : {size_t{48}, size_t{64}}) {
     Rig rig(mem_words);
     rig.port.bus.devices.emplace_back(ROM_A);
@@ -665,7 +739,17 @@ TEST(RmtOneWireSearchContract, I4_SearchSectionsAreThreeSlotsWithRx) {
     const size_t first = rig.port.sections.size();
     ASSERT_EQ(rig.engine.search_next(), ROM_A);
 
-    ASSERT_GE(rig.port.sections.size(), first + 64);
+    ASSERT_EQ(rig.port.sections.size(), first + 65);
+    std::string expected = "READ:2";
+    for (int i = 0; i < 63; i++)
+      expected += " READ:3";
+    expected += " WRITE:1";
+    EXPECT_EQ(rig.port.summary(first), expected);
+    const size_t last = rig.port.sections.size() - 1;
+    EXPECT_FALSE(rig.port.sections[last].armed) << "the closing WRITE has no RX";
+    EXPECT_EQ(rig.port.calls.back(), PortCall::TX);
+    EXPECT_EQ(rig.port.calls[rig.port.calls.size() - 2], PortCall::TX) << "no arm_rx() before the closing WRITE";
+
     size_t slots = 0;
     for (size_t i = first; i < rig.port.sections.size(); i++) {
       const auto &section = rig.port.sections[i];
@@ -708,7 +792,7 @@ TEST(RmtOneWireSearchContract, I8_SearchOnTheWireIsBitComplementBranch) {
 
 namespace {
 
-enum class SearchFailure : uint8_t { CAPTURE, TIMEOUT, ARM, TX };
+enum class SearchFailure : uint8_t { CAPTURE, ENDS_ON_LOW, LOW_OF_A_SLOT, TIMEOUT, ARM, TX };
 
 void run_search_failure(SearchFailure failure) {
   Rig rig;
@@ -726,6 +810,18 @@ void run_search_failure(SearchFailure failure) {
       rig.port.capture_mutator = [=](size_t section, std::vector<Symbol> &capture) {
         if (static_cast<int>(section) == fail_at)
           capture.pop_back();
+      };
+      break;
+    case SearchFailure::ENDS_ON_LOW:
+      rig.port.capture_mutator = [=](size_t section, std::vector<Symbol> &capture) {
+        if (static_cast<int>(section) == fail_at)
+          capture.back() = Symbol{100, 0, 0, 0};
+      };
+      break;
+    case SearchFailure::LOW_OF_A_SLOT:
+      rig.port.capture_mutator = [=](size_t section, std::vector<Symbol> &capture) {
+        if (static_cast<int>(section) == fail_at)
+          capture[1].duration0 = 80;
       };
       break;
     case SearchFailure::TIMEOUT:
@@ -751,9 +847,31 @@ void run_search_failure(SearchFailure failure) {
 }  // namespace
 
 TEST(RmtOneWireSearchContract, I8_ZeroOnCaptureErrorThenRecovers) { run_search_failure(SearchFailure::CAPTURE); }
+TEST(RmtOneWireSearchContract, I8_ZeroOnCaptureEndingLowThenRecovers) {
+  run_search_failure(SearchFailure::ENDS_ON_LOW);
+}
+TEST(RmtOneWireSearchContract, I8_ZeroOnLowOfASlotThenRecovers) { run_search_failure(SearchFailure::LOW_OF_A_SLOT); }
 TEST(RmtOneWireSearchContract, I8_ZeroOnTimeoutThenRecovers) { run_search_failure(SearchFailure::TIMEOUT); }
 TEST(RmtOneWireSearchContract, I8_ZeroOnArmFailureThenRecovers) { run_search_failure(SearchFailure::ARM); }
 TEST(RmtOneWireSearchContract, I8_ZeroOnTxFailureThenRecovers) { run_search_failure(SearchFailure::TX); }
+
+TEST(RmtOneWireSearchContract, I8_ZeroWhenTheClosingWriteFails) {
+  for (bool timeout : {false, true}) {
+    Rig rig;
+    rig.port.bus.devices.emplace_back(ROM_A);
+    rig.engine.reset_search();
+    ASSERT_EQ(rig.engine.reset_blocking(), 1);
+    ASSERT_TRUE(rig.engine.write_blocking(&SEARCH_ROM, 8));
+    const int closing = static_cast<int>(rig.port.sections.size()) + 64;
+    if (timeout) {
+      rig.port.drop_tx_at = closing;
+    } else {
+      rig.port.fail_tx_at = rig.port.tx_count + 64;
+    }
+    EXPECT_EQ(rig.engine.search_next(), 0u) << "timeout " << timeout;
+    EXPECT_EQ(rig.port.abort_count, timeout ? 1 : 0) << "no RX armed in the closing WRITE";
+  }
+}
 
 TEST(RmtOneWireSearchContract, I8_SearchDrainsTheFifoFirst) {
   Rig rig;

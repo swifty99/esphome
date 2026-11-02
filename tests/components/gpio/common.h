@@ -441,6 +441,7 @@ class SimPort : public Port {
   int abort_count{0};
   int wait_calls{0};
   int isr_violations{0};  ///< Port methods called from inside on_tx_done() or on_rx_done()
+  int double_arms{0};     ///< arm_rx() while RX was still armed, it fails like the real driver
   bool loop_active() const { return this->loop_active_; }
 
   // ---- Port ----
@@ -457,6 +458,10 @@ class SimPort : public Port {
     this->calls.push_back(PortCall::ARM);
     if (this->arm_count++ == this->fail_arm_at)
       return false;
+    if (this->rx_armed_ || this->rx_outstanding_) {
+      this->double_arms++;
+      return false;
+    }
     this->rx_buffer_ = buffer;
     this->rx_capacity_ = capacity;
     this->rx_idle_us_ = idle_us;
@@ -642,7 +647,7 @@ class SimPort : public Port {
         out += "RESET";
       } else {
         out += section.armed ? "READ:" : "WRITE:";
-        out += std::to_string(section.tx.size());
+        out += std::to_string(section.tx.size());  // NOLINT
       }
     }
     return out;
@@ -757,7 +762,10 @@ struct Rig {
   explicit Rig(size_t mem_words = 64) : port(mem_words), engine(&port, mem_words), mem_words_(mem_words) {
     this->port.attach(&this->engine);
   }
-  ~Rig() { EXPECT_EQ(this->port.isr_violations, 0) << "Port called from inside on_tx_done() or on_rx_done()"; }
+  ~Rig() {
+    EXPECT_EQ(this->port.isr_violations, 0) << "Port called from inside on_tx_done() or on_rx_done()";
+    EXPECT_EQ(this->port.double_arms, 0) << "arm_rx() while RX was still armed";
+  }
 
   SimPort port;
   Engine engine;

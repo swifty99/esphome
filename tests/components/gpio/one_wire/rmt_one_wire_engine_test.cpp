@@ -209,6 +209,58 @@ TEST(RmtOneWireEngine, Rule4_OnDoneMaySubmitAnotherTransactionAndKeepsTheLoop) {
   EXPECT_EQ(second.read_bytes, PAYLOAD);
 }
 
+TEST(RmtOneWireEngine, Rule4_NullOnDoneIsAllowed) {
+  Rig rig;
+  add_scratchpad_device(rig);
+  DoneLog log;
+  Job silent(&log, 1, 0, {0x44}, 0);
+  Job next(&log, 2, ROM_A, {READ_SCRATCHPAD}, 9);
+  silent.t.on_done = nullptr;
+  ASSERT_TRUE(rig.engine.submit(&silent.t));
+  ASSERT_TRUE(rig.engine.submit(&next.t));
+  rig.pump();
+  EXPECT_EQ(log, (DoneLog{{2, TransactionStatus::OK}}));
+  EXPECT_EQ(next.read_bytes, PAYLOAD);
+  const auto frames = rig.port.frames();
+  ASSERT_EQ(frames.size(), 2u);
+  EXPECT_EQ(slots_to_string(frames[0]), slots_to_string(silent.slots()));
+  EXPECT_TRUE(rig.engine.is_idle());
+  EXPECT_FALSE(rig.port.loop_active());
+  EXPECT_TRUE(rig.engine.submit(&silent.t)) << "no longer pending";
+  rig.pump();
+  EXPECT_EQ(rig.port.frames().size(), 3u);
+}
+
+TEST(RmtOneWireEngine, Rule4_NullOnDoneOnEveryErrorEnd) {
+  Rig rig;  // no device: NO_PRESENCE
+  DoneLog log;
+  Job silent(&log, 1, 0, {0x44}, 0);
+  silent.t.on_done = nullptr;
+  ASSERT_TRUE(rig.engine.submit(&silent.t));
+  rig.pump();
+  EXPECT_EQ(rig.port.summary(), "RESET");
+  EXPECT_TRUE(rig.engine.is_idle());
+
+  rig.port.drop_rx_at = 1;  // TIMEOUT
+  ASSERT_TRUE(rig.engine.submit(&silent.t));
+  rig.pump();
+  EXPECT_EQ(rig.port.abort_count, 1);
+  EXPECT_TRUE(rig.engine.is_idle());
+
+  rig.port.line_low_until_us = rig.port.now_us() + 100 * MS;  // BUS_LOW
+  ASSERT_TRUE(rig.engine.submit(&silent.t));
+  rig.pump();
+  EXPECT_EQ(rig.port.sections.size(), 2u);
+  EXPECT_TRUE(rig.engine.is_idle());
+
+  rig.engine.set_failed();  // HARDWARE_ERROR
+  ASSERT_TRUE(rig.engine.submit(&silent.t));
+  rig.pump();
+  EXPECT_TRUE(rig.engine.is_idle());
+  EXPECT_FALSE(rig.port.loop_active());
+  EXPECT_TRUE(log.empty());
+}
+
 // ---- PRECHECK --------------------------------------------------------------------------------
 
 TEST(RmtOneWireEngine, Precheck_LineLowOverSeveralPollsThenStarts) {
@@ -689,7 +741,8 @@ TEST(RmtOneWireEngine, Precheck_BusLowWorksAcrossTheClockWrap) {
 namespace {
 
 /// Drives the next transaction by hand and checks that late messages did not advance it.
-void expect_next_is_not_advanced_and_completes(Rig &rig, DoneLog &log, Job &next, size_t sections_before) {
+void expect_next_is_not_advanced_and_completes(Rig &rig, DoneLog &log, Job &next, size_t sections_before,
+                                               TransactionStatus first_status = TransactionStatus::TIMEOUT) {
   rig.poll_times(5);
   ASSERT_EQ(rig.port.sections.size(), sections_before + 1) << "the next transaction starts its RESET, nothing more";
   EXPECT_TRUE(rig.port.sections.back().is_reset());
@@ -709,11 +762,31 @@ void expect_next_is_not_advanced_and_completes(Rig &rig, DoneLog &log, Job &next
     if (armed)
       rig.port.fire_rx();
   }
-  EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::TIMEOUT}, {2, TransactionStatus::OK}}));
+  EXPECT_EQ(log, (DoneLog{{1, first_status}, {2, TransactionStatus::OK}}));
   EXPECT_EQ(next.read_bytes, PAYLOAD);
 }
 
 }  // namespace
+
+TEST(RmtOneWireEngine, I9_LateCompletionInsideAbortAfterFailedStartIsDiscarded) {
+  // Rule 7 also holds for the abort() of rule 6
+  Rig rig;
+  add_scratchpad_device(rig);
+  rig.port.manual = true;
+  rig.port.fail_tx_at = 0;
+  DoneLog log;
+  Job failing(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+  Job next(&log, 2, ROM_A, {READ_SCRATCHPAD}, 9);
+  rig.port.on_abort = [&] {
+    rig.engine.on_tx_done();
+    rig.engine.on_rx_done(1);
+  };
+  ASSERT_TRUE(rig.engine.submit(&failing.t));
+  ASSERT_TRUE(rig.engine.submit(&next.t));
+  rig.engine.poll();
+  ASSERT_EQ(rig.port.abort_count, 1);
+  expect_next_is_not_advanced_and_completes(rig, log, next, 0, TransactionStatus::HARDWARE_ERROR);
+}
 
 TEST(RmtOneWireEngine, I9_LateCompletionInsideAbortIsDiscarded) {
   Rig rig;
@@ -911,7 +984,7 @@ TEST(RmtOneWireEngine, Errors_BadReadCaptureStopsTheTransaction) {
   EXPECT_EQ(rig.port.abort_count, 0);
 }
 
-TEST(RmtOneWireEngine, Errors_LineToGndDuringReadIsNeverOk) {
+TEST(RmtOneWireEngine, Errors_LineToGndDuringReadIsCaptureError) {
   Rig rig;
   add_scratchpad_device(rig);
   rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
@@ -922,9 +995,69 @@ TEST(RmtOneWireEngine, Errors_LineToGndDuringReadIsNeverOk) {
   Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
   ASSERT_TRUE(rig.engine.submit(&job.t));
   rig.pump();
-  ASSERT_EQ(log.size(), 1u);
-  EXPECT_TRUE(log[0].status == TransactionStatus::CAPTURE_ERROR || log[0].status == TransactionStatus::BUS_LOW)
-      << static_cast<int>(log[0].status);
+  EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::CAPTURE_ERROR}}));
+  EXPECT_EQ(rig.port.sections.size(), 4u);
+}
+
+TEST(RmtOneWireEngine, Errors_LineToGndInTheLastSlotIsCaptureError) {
+  // Section 7: the symbol count is right and the first bits are fine, only the end is on Low
+  for (size_t failing_section : {size_t{3}, size_t{4}}) {
+    Rig rig;
+    add_scratchpad_device(rig);
+    rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
+      if (section == failing_section)
+        capture.back() = Symbol{100, 0, 0, 0};
+    };
+    DoneLog log;
+    Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+    ASSERT_TRUE(rig.engine.submit(&job.t));
+    rig.pump();
+    EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::CAPTURE_ERROR}})) << "section " << failing_section;
+    EXPECT_EQ(rig.port.sections.size(), failing_section + 1);
+  }
+}
+
+TEST(RmtOneWireEngine, Errors_LowTimeLimitIn79Out80) {
+  const std::vector<uint8_t> ones(9, 0xFF);
+  for (size_t failing_section : {size_t{3}, size_t{4}}) {
+    for (bool last_slot : {false, true}) {
+      auto patch = [&](std::vector<Symbol> &capture, uint16_t low) {
+        capture[last_slot ? capture.size() - 1 : 5].duration0 = low;
+      };
+      {
+        Rig rig;
+        rig.port.bus.devices.emplace_back(ROM_A, ones, 1);
+        rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
+          if (section == failing_section)
+            patch(capture, 79);
+        };
+        DoneLog log;
+        Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+        ASSERT_TRUE(rig.engine.submit(&job.t));
+        rig.pump();
+        EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::OK}})) << "79 us is a slow 0";
+        int zeros = 0;
+        for (auto byte : job.read_bytes) {
+          for (int bit = 0; bit < 8; bit++)
+            zeros += ((byte >> bit) & 1) == 0;
+        }
+        EXPECT_EQ(zeros, 1);
+      }
+      {
+        Rig rig;
+        rig.port.bus.devices.emplace_back(ROM_A, ones, 1);
+        rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
+          if (section == failing_section)
+            patch(capture, 80);
+        };
+        DoneLog log;
+        Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+        ASSERT_TRUE(rig.engine.submit(&job.t));
+        rig.pump();
+        EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::CAPTURE_ERROR}})) << "80 us is a held bus";
+      }
+    }
+  }
 }
 
 TEST(RmtOneWireEngine, Errors_BadCrcIsStillOk) {
@@ -947,18 +1080,19 @@ struct PortFailure {
   int fail_tx_at;
   size_t sections_started;  ///< Started before the failure
   int tx_calls;             ///< start_tx() calls of the failing transaction
+  int aborts;               ///< Rule 6: only a failed start_tx() behind an armed RX needs abort()
 };
 
 class RmtOneWirePortFailure : public ::testing::TestWithParam<PortFailure> {};
 
 // Sections of the transaction: RESET, WRITE, WRITE, READ, READ
 INSTANTIATE_TEST_SUITE_P(Errors, RmtOneWirePortFailure,
-                         ::testing::Values(PortFailure{"ArmReset", 0, SimPort::NEVER, 0, 0},
-                                           PortFailure{"ArmRead", 1, SimPort::NEVER, 3, 3},
-                                           PortFailure{"ArmSecondRead", 2, SimPort::NEVER, 4, 4},
-                                           PortFailure{"TxReset", SimPort::NEVER, 0, 0, 1},
-                                           PortFailure{"TxWrite", SimPort::NEVER, 1, 1, 2},
-                                           PortFailure{"TxRead", SimPort::NEVER, 3, 3, 4}),
+                         ::testing::Values(PortFailure{"ArmReset", 0, SimPort::NEVER, 0, 0, 0},
+                                           PortFailure{"ArmRead", 1, SimPort::NEVER, 3, 3, 0},
+                                           PortFailure{"ArmSecondRead", 2, SimPort::NEVER, 4, 4, 0},
+                                           PortFailure{"TxReset", SimPort::NEVER, 0, 0, 1, 1},
+                                           PortFailure{"TxWrite", SimPort::NEVER, 1, 1, 2, 0},
+                                           PortFailure{"TxRead", SimPort::NEVER, 3, 3, 4, 1}),
                          [](const ::testing::TestParamInfo<PortFailure> &info) { return info.param.name; });
 
 TEST_P(RmtOneWirePortFailure, HardwareErrorThenNextRunsNormally) {
@@ -969,16 +1103,44 @@ TEST_P(RmtOneWirePortFailure, HardwareErrorThenNextRunsNormally) {
   DoneLog log;
   Job failing(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
   Job next(&log, 2, ROM_A, {READ_SCRATCHPAD}, 9);
+  int aborts_at_on_done = -1;
+  failing.then = [&](TransactionStatus) { aborts_at_on_done = rig.port.abort_count; };
   ASSERT_TRUE(rig.engine.submit(&failing.t));
   rig.pump();
   EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::HARDWARE_ERROR}}));
   EXPECT_EQ(rig.port.sections.size(), GetParam().sections_started);
   EXPECT_EQ(rig.port.tx_count, GetParam().tx_calls) << "TX must not start after arm_rx() failed";
+  EXPECT_EQ(rig.port.abort_count, GetParam().aborts);
+  EXPECT_EQ(aborts_at_on_done, GetParam().aborts) << "abort() comes before the transaction ends";
 
   ASSERT_TRUE(rig.engine.submit(&next.t));
   rig.pump();
   EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::HARDWARE_ERROR}, {2, TransactionStatus::OK}}));
   EXPECT_EQ(next.read_bytes, PAYLOAD);
+}
+
+TEST(RmtOneWireEngine, Errors_FailedStartWhoseAbortFailsIsPermanent) {
+  Rig rig;
+  add_scratchpad_device(rig);
+  rig.port.fail_tx_at = 0;
+  rig.port.fail_abort = true;
+  DoneLog log;
+  Job failing(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+  Job queued(&log, 2, ROM_A, {READ_SCRATCHPAD}, 9);
+  Job later(&log, 3, ROM_A, {READ_SCRATCHPAD}, 9);
+  ASSERT_TRUE(rig.engine.submit(&failing.t));
+  ASSERT_TRUE(rig.engine.submit(&queued.t));
+  rig.pump();
+  EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::HARDWARE_ERROR}, {2, TransactionStatus::HARDWARE_ERROR}}));
+  ASSERT_TRUE(rig.engine.submit(&later.t));
+  rig.pump();
+  EXPECT_EQ(log.size(), 3u);
+  EXPECT_EQ(log.back(), (DoneEntry{3, TransactionStatus::HARDWARE_ERROR}));
+  EXPECT_EQ(rig.port.tx_count, 1) << "no RMT call on a failed bus";
+  EXPECT_EQ(rig.port.arm_count, 1) << "no RMT call on a failed bus";
+  EXPECT_EQ(rig.port.abort_count, 1) << "no RMT call on a failed bus";
+  EXPECT_TRUE(rig.engine.is_idle());
+  EXPECT_FALSE(rig.port.loop_active());
 }
 
 TEST(RmtOneWireEngine, Errors_SetFailedEndsRunningQueuedAndFutureWork) {
@@ -1037,8 +1199,10 @@ bool section_capture_is_valid(const Section &section) {
   const size_t expected = section.tx.size();
   if (section.capture.size() < expected)
     return false;
+  if (!section.capture.empty() && section.capture.back().level1 == 0)
+    return false;
   for (size_t i = 0; i < expected; i++) {
-    if (section.capture[i].level0 != 0 || section.capture[i].duration0 == 0)
+    if (section.capture[i].level0 != 0 || section.capture[i].duration0 == 0 || section.capture[i].duration0 >= 80)
       return false;
   }
   for (size_t i = expected; i < section.capture.size(); i++) {
@@ -1053,7 +1217,9 @@ bool section_capture_is_valid(const Section &section) {
 class RmtOneWireFuzz : public ::testing::TestWithParam<size_t> {};
 
 INSTANTIATE_TEST_SUITE_P(W, RmtOneWireFuzz, ::testing::Values(size_t{48}, size_t{64}),
-                         [](const ::testing::TestParamInfo<size_t> &info) { return std::to_string(info.param); });
+                         [](const ::testing::TestParamInfo<size_t> &info) {
+                           return std::to_string(info.param);  // NOLINT
+                         });
 
 TEST_P(RmtOneWireFuzz, I5_OkOnlyWithACompleteDecode) {
   std::mt19937 rng(0xCAFE);
@@ -1071,7 +1237,7 @@ TEST_P(RmtOneWireFuzz, I5_OkOnlyWithACompleteDecode) {
     rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
       if (section == 0 || rig.port.sections[section].tx.empty())
         return;
-      switch (rng() % 8) {
+      switch (rng() % 10) {
         case 0:
           capture.resize(rng() % (capture.size() + 1));
           break;
@@ -1084,6 +1250,14 @@ TEST_P(RmtOneWireFuzz, I5_OkOnlyWithACompleteDecode) {
           break;
         case 3:
           capture.push_back(Symbol{0, 0, 0, 1});
+          break;
+        case 4:
+          if (!capture.empty())
+            capture.back().level1 = 0;
+          break;
+        case 5:
+          if (!capture.empty())
+            capture[rng() % capture.size()].duration0 = 80 + rng() % 100;
           break;
         default:
           break;

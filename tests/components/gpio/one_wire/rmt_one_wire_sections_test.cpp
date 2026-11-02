@@ -54,7 +54,9 @@ void expect_sections_fit(const SimPort &port, size_t mem_words, const char *cont
 class RmtOneWireSections : public ::testing::TestWithParam<size_t> {};
 
 INSTANTIATE_TEST_SUITE_P(W, RmtOneWireSections, ::testing::Values(size_t{48}, size_t{64}),
-                         [](const ::testing::TestParamInfo<size_t> &info) { return std::to_string(info.param); });
+                         [](const ::testing::TestParamInfo<size_t> &info) {
+                           return std::to_string(info.param);  // NOLINT
+                         });
 
 // ---- I4: the table of section 4.2 as an exact expectation ------------------------------------
 
@@ -101,7 +103,7 @@ void check_one_length(Rig &rig, std::mt19937 &rng, uint64_t address, size_t writ
   ASSERT_TRUE(rig.engine.is_idle());
   EXPECT_EQ(job.read_bytes, payload) << "write " << write_len << " read " << read_len;
 
-  const std::string context = "write " + std::to_string(write_len) + " read " + std::to_string(read_len);
+  const std::string context = "write " + std::to_string(write_len) + " read " + std::to_string(read_len);  // NOLINT
   expect_sections_fit(rig.port, rig.mem_words(), context.c_str());
 
   const auto frames = rig.port.frames();
