@@ -223,6 +223,32 @@ def test_rmt_timing_reaches_the_constructor(
     assert ".read_threshold_us = 15" in main_cpp
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"read_threshold": "15us"},
+        {"slot": "100us"},
+        {"read_threshold": "15us", "slot": "100us", "write0_low": "80us"},
+    ],
+    ids=["read_threshold_alone", "slot_alone", "swapped_keys"],
+)
+def test_rmt_timing_fields_keep_the_declaration_order(
+    generate_main: Callable[[str | Path], str],
+    write_yaml: Callable[[str], Path],
+    values: dict[str, str],
+) -> None:
+    """GCC rejects designated initializers out of declaration order."""
+    main_cpp = generate_main(
+        write_yaml(_yaml(ESP32_S3_IDF, USE_RMT + _timing(**values)))
+    )
+
+    write0_low = main_cpp.index(".write0_low_us")
+    assert write0_low < main_cpp.index(".slot_us", write0_low)
+    assert main_cpp.index(".slot_us", write0_low) < main_cpp.index(
+        ".read_threshold_us", write0_low
+    )
+
+
 def test_without_rmt_timing_the_constructor_keeps_its_default(
     generate_main: Callable[[str | Path], str], write_yaml: Callable[[str], Path]
 ) -> None:

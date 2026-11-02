@@ -3,6 +3,8 @@ one_wire:
     id: ow_dallas_temp
     pin: 4
     use_rmt: true
+    rmt_timing:
+      read_threshold: 15us
 
 sensor:
   - platform: dallas_temp
