@@ -12,13 +12,31 @@ from .. import gpio_ns
 CODEOWNERS = ["@ssieb"]
 
 CONF_USE_RMT = "use_rmt"
+CONF_RMT_TIMING = "rmt_timing"
+
+# Option, with _us also its field in rmt_one_wire::Timing: default, minimum, maximum in us
+RMT_TIMING = {
+    "write0_low": (65, 60, 105),
+    "slot": (80, 71, 120),
+    "read_threshold": (13, 10, 25),
+}
 
 GPIOOneWireBus = gpio_ns.class_("GPIOOneWireBus", OneWireBus, cg.Component)
 GPIORMTOneWireBus = gpio_ns.class_("GPIORMTOneWireBus", OneWireBus, cg.Component)
+Timing = gpio_ns.namespace("rmt_one_wire").struct("Timing")
+
+
+def _validate_rmt_timing(timing: ConfigType) -> ConfigType:
+    # Rise time budget of 9 us and 2 us of recovery
+    if timing["write0_low"].total_microseconds + 11 > timing["slot"].total_microseconds:
+        raise cv.Invalid("slot must be at least write0_low + 11us")
+    return timing
 
 
 def _validate_use_rmt(config: ConfigType) -> ConfigType:
     if not config[CONF_USE_RMT]:
+        if CONF_RMT_TIMING in config:
+            raise cv.Invalid("rmt_timing needs use_rmt: true", path=[CONF_RMT_TIMING])
         return config
     if not CORE.is_esp32:
         raise cv.Invalid("use_rmt is only available on ESP32", path=[CONF_USE_RMT])
@@ -39,6 +57,21 @@ CONFIG_SCHEMA = cv.All(
             cv.GenerateID(): cv.declare_id(GPIOOneWireBus),
             cv.Required(CONF_PIN): pins.internal_gpio_output_pin_schema,
             cv.Optional(CONF_USE_RMT, default=False): cv.boolean,
+            cv.Optional(CONF_RMT_TIMING): cv.All(
+                cv.Schema(
+                    {
+                        cv.Optional(option, default=f"{default}us"): cv.All(
+                            cv.positive_time_period_microseconds,
+                            cv.Range(
+                                min=cv.TimePeriod(microseconds=low),
+                                max=cv.TimePeriod(microseconds=high),
+                            ),
+                        )
+                        for option, (default, low, high) in RMT_TIMING.items()
+                    }
+                ),
+                _validate_rmt_timing,
+            ),
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _validate_use_rmt,
@@ -46,7 +79,11 @@ CONFIG_SCHEMA = cv.All(
 
 
 async def to_code(config: ConfigType) -> None:
-    var = cg.new_Pvariable(config[CONF_ID])
+    args = []
+    if timing := config.get(CONF_RMT_TIMING):
+        fields = ((f"{key}_us", val.total_microseconds) for key, val in timing.items())
+        args.append(cg.StructInitializer(Timing, *fields))
+    var = cg.new_Pvariable(config[CONF_ID], *args)
     await cg.register_component(var, config)
 
     await cg.add_pin(var.set_pin, config[CONF_PIN])

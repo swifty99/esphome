@@ -148,3 +148,83 @@ def test_dallas_temp_resolves_the_rmt_bus(
 
     assert "gpio::GPIORMTOneWireBus" in main_cpp
     assert "set_one_wire_bus(ow)" in main_cpp
+
+
+def _timing(**values: str) -> str:
+    lines = "".join(f"      {key}: {value}\n" for key, value in values.items())
+    return f"    rmt_timing:\n{lines}" if lines else "    rmt_timing: {}\n"
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {},
+        {"write0_low": "60us"},
+        {"write0_low": "105us", "slot": "120us"},
+        {"write0_low": "60us", "slot": "71us"},
+        {"slot": "120us"},
+        {"read_threshold": "10us"},
+        {"read_threshold": "25us"},
+    ],
+)
+def test_rmt_timing_accepts_the_range(
+    validate: Callable[[str], Config], values: dict[str, str]
+) -> None:
+    result = validate(_yaml(ESP32_S3_IDF, USE_RMT + _timing(**values)))
+    assert not result.errors, _error_text(result)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"write0_low": "59us"},
+        {"write0_low": "106us", "slot": "120us"},
+        {"write0_low": "60us", "slot": "70us"},
+        {"slot": "121us"},
+        {"read_threshold": "9us"},
+        {"read_threshold": "26us"},
+    ],
+)
+def test_rmt_timing_rejects_values_out_of_range(
+    validate: Callable[[str], Config], values: dict[str, str]
+) -> None:
+    assert validate(_yaml(ESP32_S3_IDF, USE_RMT + _timing(**values))).errors
+
+
+@pytest.mark.parametrize(
+    ("values", "valid"),
+    [
+        ({"write0_low": "69us", "slot": "80us"}, True),
+        ({"write0_low": "70us", "slot": "80us"}, False),
+        ({"write0_low": "80us"}, False),
+    ],
+)
+def test_rmt_timing_keeps_recovery_after_a_written_0(
+    validate: Callable[[str], Config], values: dict[str, str], valid: bool
+) -> None:
+    result = validate(_yaml(ESP32_S3_IDF, USE_RMT + _timing(**values)))
+    assert not result.errors if valid else "write0_low + 11us" in _error_text(result)
+
+
+@pytest.mark.parametrize("bus", ["", "    use_rmt: false\n"])
+def test_rmt_timing_needs_use_rmt(validate: Callable[[str], Config], bus: str) -> None:
+    result = validate(_yaml(ESP32_S3_IDF, bus + _timing(slot="100us")))
+    assert "rmt_timing needs use_rmt: true" in _error_text(result)
+
+
+def test_rmt_timing_reaches_the_constructor(
+    generate_main: Callable[[str | Path], str], write_yaml: Callable[[str], Path]
+) -> None:
+    bus = USE_RMT + _timing(write0_low="80us", slot="100us", read_threshold="15us")
+    main_cpp = generate_main(write_yaml(_yaml(ESP32_S3_IDF, bus)))
+
+    assert ".write0_low_us = 80" in main_cpp
+    assert ".slot_us = 100" in main_cpp
+    assert ".read_threshold_us = 15" in main_cpp
+
+
+def test_without_rmt_timing_the_constructor_keeps_its_default(
+    generate_main: Callable[[str | Path], str], write_yaml: Callable[[str], Path]
+) -> None:
+    main_cpp = generate_main(write_yaml(_yaml(ESP32_S3_IDF, USE_RMT)))
+    assert "rmt_one_wire::Timing" not in main_cpp
