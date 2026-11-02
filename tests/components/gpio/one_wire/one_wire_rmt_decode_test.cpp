@@ -108,7 +108,8 @@ TEST(OneWireRmtSearch, FindsASingleDevice) {
 TEST(OneWireRmtSearch, FindsTwoRealDevices) {
   // The ROM codes of the two DS18B20 clones this driver was first tried on
   auto found = enumerate({0xDB0000065CDB4728ULL, 0x120000065C17EE28ULL});
-  EXPECT_EQ(std::set<uint64_t>(found.begin(), found.end()), (std::set<uint64_t>{0x120000065C17EE28ULL, 0xDB0000065CDB4728ULL}));
+  EXPECT_EQ(std::set<uint64_t>(found.begin(), found.end()),
+            (std::set<uint64_t>{0x120000065C17EE28ULL, 0xDB0000065CDB4728ULL}));
   EXPECT_EQ(found.size(), 2u);
 }
 

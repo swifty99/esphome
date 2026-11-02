@@ -8,6 +8,10 @@ esp32:
 
 one_wire:
   - platform: gpio
-    id: ow_bus
+    id: ow_bus_1
     pin: 4
-    use_rmt: false
+    use_rmt: true
+  - platform: gpio
+    id: ow_bus_2
+    pin: 5
+    use_rmt: true

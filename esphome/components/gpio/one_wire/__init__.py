@@ -20,7 +20,7 @@ CONF_USE_RMT = "use_rmt"
 GPIOOneWireBus = gpio_ns.class_("GPIOOneWireBus", OneWireBus, cg.Component)
 
 
-def _validate_use_rmt(config: ConfigType) -> ConfigType:
+def validate_use_rmt(config: ConfigType) -> ConfigType:
     if config[CONF_USE_RMT]:
         cv.only_on_esp32(config[CONF_USE_RMT])
         if esp32.get_esp32_variant() in esp32_rmt.VARIANTS_NO_RMT:
@@ -39,7 +39,7 @@ CONFIG_SCHEMA = cv.All(
             cv.Optional(CONF_USE_RMT, default=False): cv.boolean,
         }
     ).extend(cv.COMPONENT_SCHEMA),
-    _validate_use_rmt,
+    validate_use_rmt,
 )
 
 
@@ -54,7 +54,8 @@ async def to_code(config: ConfigType) -> None:
         esp32.include_builtin_idf_component("esp_driver_rmt")
         cg.add_define("USE_ONE_WIRE_RMT")
         _LOGGER.info(
-            "1-wire bus on GPIO%s uses the RMT peripheral", config[CONF_PIN][CONF_NUMBER]
+            "1-wire bus on GPIO%s uses the RMT peripheral",
+            config[CONF_PIN][CONF_NUMBER],
         )
 
 

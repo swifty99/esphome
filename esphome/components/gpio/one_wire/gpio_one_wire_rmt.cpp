@@ -179,11 +179,11 @@ bool GPIOOneWireBus::exchange_(rmt_encoder_handle_t encoder, const void *data, s
 
   xQueueReset(this->rx_queue_);
   rmt_rx_done_event_data_t event;
-  bool ok = rmt_receive(this->rx_channel_, this->rx_symbols_, RX_SYMBOLS * sizeof(rmt_symbol_word_t), &rx_config) ==
-                ESP_OK &&
-            rmt_transmit(this->tx_channel_, encoder, data, size, &TX_CONFIG) == ESP_OK &&
-            xQueueReceive(this->rx_queue_, &event, pdMS_TO_TICKS(timeout_ms)) == pdPASS &&
-            rmt_tx_wait_all_done(this->tx_channel_, timeout_ms) == ESP_OK;
+  bool ok =
+      rmt_receive(this->rx_channel_, this->rx_symbols_, RX_SYMBOLS * sizeof(rmt_symbol_word_t), &rx_config) == ESP_OK &&
+      rmt_transmit(this->tx_channel_, encoder, data, size, &TX_CONFIG) == ESP_OK &&
+      xQueueReceive(this->rx_queue_, &event, pdMS_TO_TICKS(timeout_ms)) == pdPASS &&
+      rmt_tx_wait_all_done(this->tx_channel_, timeout_ms) == ESP_OK;
   if (!ok) {
     // A capture that never finished would block the next one. Disabling the channel cancels it.
     rmt_disable(this->rx_channel_);
