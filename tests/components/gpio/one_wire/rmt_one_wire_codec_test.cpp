@@ -1,0 +1,404 @@
+#include <gtest/gtest.h>
+
+#include <array>
+#include <cstdint>
+#include <random>
+#include <vector>
+
+#include "../common.h"
+
+namespace esphome::gpio::rmt_one_wire::testing {
+
+namespace {
+
+/// Capture of a read slot as an RMT receiver delivers it: Low time, then the rest of 80 us High.
+Symbol read_slot(bool bit, uint16_t zero_low = 30, uint16_t one_low = 7) {
+  uint16_t low = bit ? one_low : zero_low;
+  return Symbol{low, 0, static_cast<uint16_t>(80 - low), 1};
+}
+
+/// Capture of a whole read section, the High of the last slot idles out and is stored as 0.
+std::vector<Symbol> capture_of(const std::vector<bool> &bits) {
+  std::vector<Symbol> capture;
+  for (bool bit : bits)
+    capture.push_back(read_slot(bit));
+  if (!capture.empty())
+    capture.back().duration1 = 0;
+  return capture;
+}
+
+/// The decoder rule of section 7, as the test understands it.
+bool capture_is_valid(const std::vector<Symbol> &capture, size_t expected) {
+  if (capture.size() < expected)
+    return false;
+  for (size_t i = 0; i < expected; i++) {
+    if (capture[i].level0 != 0 || capture[i].duration0 == 0)
+      return false;
+  }
+  for (size_t i = expected; i < capture.size(); i++) {
+    if (capture[i].duration0 != 0 || capture[i].duration1 != 0)
+      return false;
+  }
+  return true;
+}
+
+bool get_bit(const uint8_t *data, size_t bit) { return (data[bit / 8] >> (bit % 8)) & 1; }
+
+}  // namespace
+
+// ---- Limits of section 4.2 ------------------------------------------------------------------
+
+TEST(RmtOneWireCodec, I4_SlotLimitsFollowTheMemoryBlock) {
+  EXPECT_EQ(max_tx_slots(64), 63u);
+  EXPECT_EQ(max_rx_slots(64), 62u);
+  EXPECT_EQ(max_tx_slots(48), 47u);
+  EXPECT_EQ(max_rx_slots(48), 46u);
+}
+
+// ---- I12: everything that is sent lies in the windows of section 3 --------------------------
+
+TEST(RmtOneWireCodec, I12_ResetSymbolInWindows) {
+  const Symbol reset = reset_symbol();
+  EXPECT_EQ(reset.level0, 0);
+  EXPECT_EQ(reset.level1, 1);
+  EXPECT_TRUE(WINDOW_RESET_LOW.contains(reset.duration0)) << reset.duration0;
+  EXPECT_TRUE(WINDOW_RESET_HIGH.contains(reset.duration1)) << reset.duration1;
+}
+
+TEST(RmtOneWireCodec, I12_WriteSlotsInWindows) {
+  for (int value = 0; value < 256; value++) {
+    const uint8_t byte = static_cast<uint8_t>(value);
+    std::array<Symbol, 8> slots{};
+    ASSERT_EQ(encode_write_slots(&byte, 0, 8, slots.data()), 8u);
+    for (size_t bit = 0; bit < 8; bit++) {
+      const Symbol &slot = slots[bit];
+      EXPECT_EQ(slot.level0, 0);
+      EXPECT_EQ(slot.level1, 1);
+      const uint32_t total = slot.duration0 + slot.duration1;
+      EXPECT_TRUE(WINDOW_SLOT.contains(total)) << total;
+      if (get_bit(&byte, bit)) {
+        EXPECT_TRUE(WINDOW_WRITE1_LOW.contains(slot.duration0)) << slot.duration0;
+      } else {
+        EXPECT_TRUE(WINDOW_WRITE0_LOW.contains(slot.duration0)) << slot.duration0;
+      }
+    }
+  }
+}
+
+TEST(RmtOneWireCodec, I12_ReadSlotsInWindows) {
+  std::array<Symbol, 8> slots{};
+  ASSERT_EQ(encode_read_slots(8, slots.data()), 8u);
+  for (const auto &slot : slots) {
+    EXPECT_EQ(slot.level0, 0);
+    EXPECT_EQ(slot.level1, 1);
+    EXPECT_TRUE(WINDOW_READ_LOW.contains(slot.duration0)) << slot.duration0;
+    EXPECT_TRUE(WINDOW_SLOT.contains(slot.duration0 + slot.duration1));
+  }
+}
+
+TEST(RmtOneWireCodec, I12_SlotsKeepTheRiseTimeBudget) {
+  // Section 3: a 1 must be High again before it is sampled, with tRC up to 9 us.
+  const uint8_t ones = 0xFF;
+  const uint8_t zeros = 0x00;
+  Symbol one{};
+  Symbol zero{};
+  Symbol read{};
+  encode_write_slots(&ones, 0, 1, &one);
+  encode_write_slots(&zeros, 0, 1, &zero);
+  encode_read_slots(1, &read);
+  EXPECT_LE(one.duration0 + BUDGET_TRC_US, SAMPLE_WRITE1_US);
+  EXPECT_LE(read.duration0 + BUDGET_TRC_US, SAMPLE_READ_US);
+  // Recovery: after a 0 the line must rise and rest before the next slot
+  EXPECT_GE(zero.duration1, BUDGET_TRC_US + MIN_RECOVERY_US);
+}
+
+TEST(RmtOneWireCodec, I12_ExactValuesOfSection43) {
+  const uint8_t ones = 0xFF;
+  const uint8_t zeros = 0x00;
+  Symbol one{};
+  Symbol zero{};
+  Symbol read{};
+  encode_write_slots(&ones, 0, 1, &one);
+  encode_write_slots(&zeros, 0, 1, &zero);
+  encode_read_slots(1, &read);
+  const Symbol reset = reset_symbol();
+  EXPECT_EQ(reset.duration0, 500);
+  EXPECT_EQ(reset.duration1, 500);
+  EXPECT_EQ(one.duration0, 6);
+  EXPECT_EQ(one.duration1, 74);
+  EXPECT_EQ(zero.duration0, 65);
+  EXPECT_EQ(zero.duration1, 15);
+  EXPECT_EQ(read.duration0, 4);
+  EXPECT_EQ(read.duration1, 76);
+}
+
+// ---- Encoding -------------------------------------------------------------------------------
+
+TEST(RmtOneWireCodec, EncodeWriteIsLsbFirstFromBitOffset) {
+  const std::array<uint8_t, 3> data{0b10110010, 0b01000111, 0b11100001};
+  for (size_t offset = 0; offset < 24; offset++) {
+    for (size_t bits = 0; offset + bits <= 24; bits++) {
+      std::array<Symbol, 26> out{};
+      const Symbol guard{1234, 1, 4321, 0};
+      out.fill(guard);
+      ASSERT_EQ(encode_write_slots(data.data(), offset, bits, out.data()), bits);
+      for (size_t i = 0; i < bits; i++) {
+        const Slot expected = get_bit(data.data(), offset + i) ? Slot::WRITE_1 : Slot::WRITE_0;
+        EXPECT_EQ(classify_slot(out[i]), expected) << "offset " << offset << " bit " << i;
+      }
+      EXPECT_EQ(out[bits].duration0, guard.duration0) << "wrote behind num_bits";
+    }
+  }
+}
+
+TEST(RmtOneWireCodec, EncodeReadWritesExactlyNumBits) {
+  for (size_t bits = 0; bits <= 62; bits++) {
+    std::array<Symbol, 64> out{};
+    const Symbol guard{1234, 1, 4321, 0};
+    out.fill(guard);
+    ASSERT_EQ(encode_read_slots(bits, out.data()), bits);
+    for (size_t i = 0; i < bits; i++)
+      EXPECT_EQ(classify_slot(out[i]), Slot::READ);
+    EXPECT_EQ(out[bits].duration0, guard.duration0) << "wrote behind num_bits";
+  }
+}
+
+// ---- decode_reset, section 4.3 ---------------------------------------------------------------
+
+struct ResetCase {
+  const char *name;
+  std::vector<Symbol> capture;
+  ResetResult expected;
+};
+
+class RmtOneWireDecodeReset : public ::testing::TestWithParam<ResetCase> {};
+
+TEST_P(RmtOneWireDecodeReset, Result) {
+  const auto &param = GetParam();
+  const Symbol dummy{};
+  const Symbol *capture = param.capture.empty() ? &dummy : param.capture.data();
+  EXPECT_EQ(static_cast<int>(decode_reset(capture, param.capture.size())), static_cast<int>(param.expected));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    I5, RmtOneWireDecodeReset,
+    ::testing::Values(
+        ResetCase{"TypicalPresence", {{503, 0, 27, 1}, {120, 0, 0, 1}}, ResetResult::PRESENT},
+        ResetCase{
+            "PresenceFollowedByEndMarker", {{503, 0, 27, 1}, {120, 0, 500, 1}, {0, 0, 0, 1}}, ResetResult::PRESENT},
+        ResetCase{"ShortestPresence", {{503, 0, 27, 1}, {15, 0, 0, 1}}, ResetResult::PRESENT},
+        ResetCase{"TooShortForPresence", {{503, 0, 27, 1}, {14, 0, 0, 1}}, ResetResult::NO_DEVICE},
+        ResetCase{"LatestPresence", {{503, 0, 300, 1}, {60, 0, 0, 1}}, ResetResult::PRESENT},
+        ResetCase{"TooLateForPresence", {{503, 0, 301, 1}, {60, 0, 0, 1}}, ResetResult::NO_DEVICE},
+        ResetCase{"GlitchThenPresence", {{503, 0, 20, 1}, {5, 0, 30, 1}, {100, 0, 0, 1}}, ResetResult::PRESENT},
+        // The presence begins 355 us after the release: 250 + 5 + 100
+        ResetCase{"GlitchThenTooLate", {{503, 0, 250, 1}, {5, 0, 100, 1}, {60, 0, 0, 1}}, ResetResult::NO_DEVICE},
+        ResetCase{"NoDevice", {{503, 0, 0, 1}}, ResetResult::NO_DEVICE},
+        ResetCase{"LongestOwnPulseIsNoHang", {{599, 0, 0, 1}}, ResetResult::NO_DEVICE},
+        ResetCase{"FirstLowAtHangLimit", {{600, 0, 0, 1}}, ResetResult::BUS_LOW},
+        ResetCase{"HeldLowUntilIdle", {{600, 0, 0, 0}}, ResetResult::BUS_LOW},
+        ResetCase{"HeldLowLongNumbers", {{32767, 0, 0, 0}}, ResetResult::BUS_LOW},
+        ResetCase{"EndsOnLowAfterLongPulse", {{503, 0, 27, 1}, {600, 0, 0, 0}}, ResetResult::BUS_LOW},
+        ResetCase{"EndsOnShortLow", {{503, 0, 27, 1}, {120, 0, 0, 0}}, ResetResult::BUS_LOW},
+        ResetCase{"EndsOnLowZeroDuration", {{503, 0, 27, 1}, {0, 0, 0, 0}}, ResetResult::BUS_LOW},
+        ResetCase{"EmptyCapture", {}, ResetResult::CAPTURE_ERROR},
+        ResetCase{"StartsHigh", {{503, 1, 27, 0}, {120, 1, 0, 0}}, ResetResult::CAPTURE_ERROR}),
+    [](const ::testing::TestParamInfo<ResetCase> &info) { return info.param.name; });
+
+// ---- decode_read_slots, section 4.3 and section 7 --------------------------------------------
+
+TEST(RmtOneWireCodec, I5_ReadThresholdIs13Microseconds) {
+  for (uint16_t low = 1; low < 70; low++) {
+    const Symbol capture{low, 0, 0, 1};
+    uint8_t out = low >= 13 ? 0xFF : 0x00;
+    ASSERT_TRUE(decode_read_slots(&capture, 1, 1, &out, 0)) << low;
+    EXPECT_EQ(out & 1, low >= 13 ? 0 : 1) << "Low time " << low;
+  }
+}
+
+TEST(RmtOneWireCodec, I5_DecodeIsLsbFirstFromBitOffset) {
+  const std::array<uint8_t, 3> expected{0b10110010, 0b01000111, 0b11100001};
+  for (size_t offset = 0; offset < 24; offset += 3) {
+    std::vector<bool> bits;
+    for (size_t bit = offset; bit < 24; bit++)
+      bits.push_back(get_bit(expected.data(), bit));
+    const auto capture = capture_of(bits);
+    std::array<uint8_t, 3> out{};
+    ASSERT_TRUE(decode_read_slots(capture.data(), capture.size(), bits.size(), out.data(), offset));
+    for (size_t bit = offset; bit < 24; bit++)
+      EXPECT_EQ(get_bit(out.data(), bit), get_bit(expected.data(), bit)) << "bit " << bit;
+  }
+}
+
+TEST(RmtOneWireCodec, I5_OnlyTheDecodedBitsChange) {
+  std::mt19937 rng(1);
+  for (int round = 0; round < 2000; round++) {
+    const size_t offset = rng() % 40;
+    const size_t count = rng() % 40;
+    std::vector<bool> bits;
+    for (size_t i = 0; i < count; i++)
+      bits.push_back(rng() & 1);
+    const auto capture = capture_of(bits);
+    std::array<uint8_t, 12> before{};
+    for (auto &byte : before)
+      byte = static_cast<uint8_t>(rng());
+    auto out = before;
+    ASSERT_TRUE(decode_read_slots(capture.data(), capture.size(), count, out.data(), offset));
+    for (size_t bit = 0; bit < before.size() * 8; bit++) {
+      if (bit >= offset && bit < offset + count) {
+        EXPECT_EQ(get_bit(out.data(), bit), bits[bit - offset]) << "bit " << bit;
+      } else {
+        EXPECT_EQ(get_bit(out.data(), bit), get_bit(before.data(), bit)) << "bit " << bit << " changed";
+      }
+    }
+  }
+}
+
+TEST(RmtOneWireCodec, I5_CompleteCaptureShapesAreAccepted) {
+  const std::vector<bool> bits{true, false, true};
+  uint8_t out = 0;
+
+  auto idle_end = capture_of(bits);  // last High stored as zero
+  EXPECT_TRUE(decode_read_slots(idle_end.data(), idle_end.size(), 3, &out, 0));
+  EXPECT_EQ(out, 0b101);
+
+  std::vector<Symbol> full_last{read_slot(true), read_slot(false), read_slot(true)};
+  out = 0;
+  EXPECT_TRUE(decode_read_slots(full_last.data(), full_last.size(), 3, &out, 0));
+  EXPECT_EQ(out, 0b101);
+
+  for (const Symbol &marker : {Symbol{0, 0, 0, 0}, Symbol{0, 0, 0, 1}, Symbol{0, 1, 0, 0}, Symbol{0, 1, 0, 1}}) {
+    auto with_marker = full_last;
+    with_marker.push_back(marker);
+    with_marker.push_back(marker);
+    out = 0;
+    EXPECT_TRUE(decode_read_slots(with_marker.data(), with_marker.size(), 3, &out, 0));
+    EXPECT_EQ(out, 0b101);
+  }
+}
+
+TEST(RmtOneWireCodec, I5_ZeroBitsNeedNoSymbols) {
+  uint8_t out = 0x5A;
+  const Symbol unused{};
+  EXPECT_TRUE(decode_read_slots(&unused, 0, 0, &out, 0));
+  EXPECT_EQ(out, 0x5A);
+}
+
+TEST(RmtOneWireCodec, I5_TruncatedCaptureIsInvalid) {
+  const std::vector<bool> bits(62, false);
+  const auto complete = capture_of(bits);
+  std::array<uint8_t, 8> out{};
+  for (size_t kept = 0; kept < complete.size(); kept++)
+    EXPECT_FALSE(decode_read_slots(complete.data(), kept, bits.size(), out.data(), 0)) << "kept " << kept;
+}
+
+TEST(RmtOneWireCodec, I5_EndMarkerDoesNotReplaceAMissingSlot) {
+  // R1: on newer chips the last symbol may be missing. The end marker in its place is no slot,
+  // otherwise a missing 0 would read as a 1 and the capture would pass.
+  std::vector<Symbol> capture{read_slot(false), read_slot(false)};
+  std::array<uint8_t, 2> out{};
+  for (const Symbol &marker : {Symbol{0, 0, 0, 0}, Symbol{0, 0, 0, 1}}) {
+    capture.resize(2);
+    capture.push_back(marker);
+    EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), 3, out.data(), 0));
+  }
+}
+
+TEST(RmtOneWireCodec, I5_WrongLevelAnywhereIsInvalid) {
+  const std::vector<bool> bits{true, false, true, true, false, false, true, false};
+  const auto good = capture_of(bits);
+  std::array<uint8_t, 2> out{};
+  for (size_t i = 0; i < good.size(); i++) {
+    auto bad = good;
+    bad[i].level0 = 1;
+    EXPECT_FALSE(decode_read_slots(bad.data(), bad.size(), bits.size(), out.data(), 0)) << "symbol " << i;
+  }
+}
+
+TEST(RmtOneWireCodec, I5_SurplusSymbolsWithDurationAreInvalid) {
+  const std::vector<bool> bits{true, false, true};
+  std::array<uint8_t, 2> out{};
+  for (const Symbol &surplus : {Symbol{4, 0, 76, 1}, Symbol{1, 0, 0, 1}, Symbol{0, 0, 1, 1}, Symbol{1, 1, 0, 0}}) {
+    auto capture = capture_of(bits);
+    capture.push_back(surplus);
+    EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), out.data(), 0))
+        << surplus.duration0 << "/" << surplus.duration1;
+    // Behind zero-length markers it is still surplus
+    capture = capture_of(bits);
+    capture.push_back(Symbol{0, 0, 0, 1});
+    capture.push_back(surplus);
+    EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), out.data(), 0));
+  }
+}
+
+TEST(RmtOneWireCodec, I5_FuzzMutatedCaptures) {
+  std::mt19937 rng(0x1E5);
+  int accepted = 0;
+  int rejected = 0;
+  for (int round = 0; round < 50000; round++) {
+    const size_t count = 1 + rng() % 62;
+    std::vector<bool> bits;
+    for (size_t i = 0; i < count; i++)
+      bits.push_back(rng() & 1);
+    auto capture = capture_of(bits);
+    switch (rng() % 6) {
+      case 0:  // complete
+        break;
+      case 1:  // truncated
+        capture.resize(rng() % capture.size());
+        break;
+      case 2:  // surplus with a duration
+        capture.push_back(Symbol{static_cast<uint16_t>(rng() % 100), 0, static_cast<uint16_t>(1 + rng() % 100), 1});
+        break;
+      case 3:  // surplus end markers
+        capture.insert(capture.end(), 1 + rng() % 3, Symbol{0, static_cast<uint16_t>(rng() & 1), 0, 1});
+        break;
+      case 4:  // wrong level in a slot
+        capture[rng() % capture.size()].level0 = 1;
+        break;
+      case 5:  // truncated, then end markers
+        capture.resize(rng() % capture.size());
+        capture.insert(capture.end(), 1 + rng() % 3, Symbol{0, 0, 0, static_cast<uint16_t>(rng() & 1)});
+        break;
+    }
+    const bool valid = capture_is_valid(capture, count);
+    std::array<uint8_t, 9> out{};
+    const Symbol unused{};
+    const bool decoded =
+        decode_read_slots(capture.empty() ? &unused : capture.data(), capture.size(), count, out.data(), 0);
+    ASSERT_EQ(decoded, valid) << "round " << round << " symbols " << capture.size() << " expected " << count;
+    if (!decoded) {
+      rejected++;
+      continue;
+    }
+    accepted++;
+    for (size_t i = 0; i < count; i++)
+      ASSERT_EQ(get_bit(out.data(), i), bits[i]) << "round " << round << " bit " << i;
+  }
+  // The fuzz must exercise both outcomes to mean anything
+  EXPECT_GT(accepted, 1000);
+  EXPECT_GT(rejected, 1000);
+}
+
+TEST(RmtOneWireCodec, I5_FuzzRandomGarbage) {
+  std::mt19937 rng(0xBAD);
+  for (int round = 0; round < 50000; round++) {
+    const size_t expected = 1 + rng() % 62;
+    std::vector<Symbol> capture(rng() % 70);
+    for (auto &symbol : capture) {
+      symbol = Symbol{static_cast<uint16_t>(rng() % 4 == 0 ? 0 : rng() % 200), static_cast<uint16_t>(rng() % 8 == 0),
+                      static_cast<uint16_t>(rng() % 4 == 0 ? 0 : rng() % 200), static_cast<uint16_t>(rng() & 1)};
+    }
+    std::array<uint8_t, 9> out{};
+    const Symbol unused{};
+    const bool decoded =
+        decode_read_slots(capture.empty() ? &unused : capture.data(), capture.size(), expected, out.data(), 0);
+    ASSERT_EQ(decoded, capture_is_valid(capture, expected)) << "round " << round;
+    if (decoded) {
+      for (size_t i = 0; i < expected; i++)
+        ASSERT_EQ(get_bit(out.data(), i), capture[i].duration0 < 13) << "round " << round << " bit " << i;
+    }
+  }
+}
+
+}  // namespace esphome::gpio::rmt_one_wire::testing
