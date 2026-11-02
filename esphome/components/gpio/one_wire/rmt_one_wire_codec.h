@@ -11,8 +11,8 @@
 
 namespace esphome::gpio::rmt_one_wire {
 
-/// Same layout as rmt_symbol_word_t (static_assert in L2), usable without IDF headers.
-struct Symbol {
+/// Same size and alignment as rmt_symbol_word_t (static_assert in L2), usable without IDF headers.
+struct alignas(uint32_t) Symbol {
   uint16_t duration0 : 15;
   uint16_t level0 : 1;
   uint16_t duration1 : 15;

@@ -29,6 +29,8 @@ class Port {
 
 class Engine {
  public:
+  static constexpr size_t MAX_MEM_WORDS = 64;  // ESP32 and S2, the others have 48
+
   /// RX idle outside RESET: max(100, slot + 20) us. The RESET section keeps 600 us.
   Engine(Port *port, size_t mem_words, const Timing &timing = {});
 
@@ -55,7 +57,6 @@ class Engine {
   /// Where the transaction at the head of the FIFO stands.
   enum class Step : uint8_t { LINE_UNCHECKED, LINE_LOW, RESET, WRITE, READ };
 
-  static constexpr size_t MAX_MEM_WORDS = 64;  // ESP32 and S2, the others have 48
   static constexpr uint32_t PENDING_TX = 1;
   static constexpr uint32_t PENDING_RX = 2;
 
