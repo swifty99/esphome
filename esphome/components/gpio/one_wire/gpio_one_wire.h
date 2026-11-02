@@ -5,11 +5,12 @@
 #include "esphome/components/one_wire/one_wire.h"
 
 #ifdef USE_ONE_WIRE_RMT
-#include <driver/rmt_tx.h>
+#include "one_wire_rmt_decode.h"
 #include <driver/rmt_rx.h>
+#include <driver/rmt_tx.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
-#endif  // USE_ONE_WIRE_RMT
+#endif
 
 namespace esphome::gpio {
 
@@ -33,11 +34,6 @@ class GPIOOneWireBus final : public one_wire::OneWireBus, public Component {
 
  protected:
   InternalGPIOPin *t_pin_{};
-
-  // ROM search state (shared by both RMT and bit-bang implementations).
-  // Upstream gpio_one_wire initialises last_discrepancy_ and last_device_flag_
-  // but leaves address_ without a default.  All three fields are reset
-  // together in reset_search(), so they are initialised consistently here.
   uint8_t last_discrepancy_{0};
   bool last_device_flag_{false};
   uint64_t address_{0};
@@ -45,20 +41,28 @@ class GPIOOneWireBus final : public one_wire::OneWireBus, public Component {
   int reset_int() override;
   void reset_search() override;
   uint64_t search_int() override;
-  bool read_bit_();
-  void write_bit_(bool bit);
 
 #ifdef USE_ONE_WIRE_RMT
+  /// Send `size` bytes of `data` through `encoder`. Returns false on failure.
+  bool send_(rmt_encoder_handle_t encoder, const void *data, size_t size, uint32_t duration_us);
+  /// Like send_(), and also capture the bus. The levels seen are stored in `phases`.
+  bool exchange_(rmt_encoder_handle_t encoder, const void *data, size_t size, uint32_t idle_us, uint32_t duration_us,
+                 one_wire_rmt::Phase *phases, size_t &phase_count);
+  bool write_bit_(bool bit);
+  void report_(bool ok, const LogString *reason);
+  void destroy_();
+
   rmt_channel_handle_t tx_channel_{nullptr};
   rmt_channel_handle_t rx_channel_{nullptr};
-  rmt_encoder_handle_t tx_bytes_encoder_{nullptr};
-  rmt_encoder_handle_t tx_copy_encoder_{nullptr};
-  rmt_symbol_word_t *rx_symbols_buf_{nullptr};
-  QueueHandle_t receive_queue_{nullptr};
-
-  void destroy_();
+  rmt_encoder_handle_t bytes_encoder_{nullptr};
+  rmt_encoder_handle_t copy_encoder_{nullptr};
+  rmt_symbol_word_t *rx_symbols_{nullptr};
+  QueueHandle_t rx_queue_{nullptr};
 #else
   ISRInternalGPIOPin pin_;
+  void write_bit_(bool bit);
+  bool read_bit_();
+  bool read_bit_(uint32_t *t);
 #endif
 };
 

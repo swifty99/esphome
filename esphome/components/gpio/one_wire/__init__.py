@@ -6,8 +6,7 @@ from esphome.components import esp32, esp32_rmt
 from esphome.components.one_wire import OneWireBus
 from esphome.config_helpers import filter_source_files_from_platform
 import esphome.config_validation as cv
-from esphome.const import CONF_ID, CONF_PIN, PlatformFramework
-from esphome.core import CORE
+from esphome.const import CONF_ID, CONF_NUMBER, CONF_PIN, PlatformFramework
 from esphome.types import ConfigType
 
 from .. import gpio_ns
@@ -54,9 +53,9 @@ async def to_code(config: ConfigType) -> None:
         # ESP-IDF's RMT driver is excluded from the build by default
         esp32.include_builtin_idf_component("esp_driver_rmt")
         cg.add_define("USE_ONE_WIRE_RMT")
-        _LOGGER.info("1-wire bus on %s: using the RMT peripheral", config[CONF_PIN])
-    elif CORE.is_esp32:
-        _LOGGER.debug("1-wire bus on %s: using GPIO bit-banging", config[CONF_PIN])
+        _LOGGER.info(
+            "1-wire bus on GPIO%s uses the RMT peripheral", config[CONF_PIN][CONF_NUMBER]
+        )
 
 
 FILTER_SOURCE_FILES = filter_source_files_from_platform(
