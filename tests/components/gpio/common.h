@@ -340,9 +340,15 @@ class SimBus {
   bool last_slot_read_{true};
 };
 
+/// A receiver that stops on Low leaves duration1 of its last symbol unwritten. Whatever is in the
+/// memory stays there: 0 and 75 on the S3 at GPIO36, 74 and 91 in the earlier probe. Nothing may
+/// depend on this value.
+constexpr uint16_t STALE_DURATION1 = 74;
+
 /// What an RMT receiver makes of a waveform: starts at the first falling edge, stops when the
 /// line has not changed for idle_us. A stop on High stores a zero High duration with level 1, a
-/// stop on Low stores the idle Low with level 0 in the second half. end_us: time of the stop.
+/// stop on Low stores {0, 0, stale, 1} (section 7), the length of that Low is not readable.
+/// end_us: time of the stop.
 inline std::vector<Symbol> build_capture(const std::vector<Phase> &phases, uint32_t idle_us, uint64_t *end_us) {
   std::vector<Phase> merged;
   for (const auto &phase : phases) {
@@ -364,7 +370,7 @@ inline std::vector<Symbol> build_capture(const std::vector<Phase> &phases, uint3
   for (; i < merged.size(); i += 2) {
     const Phase &low = merged[i];
     if (low.us >= idle_us) {
-      capture.push_back(Symbol{static_cast<uint16_t>(idle_us), 0, 0, 0});
+      capture.push_back(Symbol{0, 0, STALE_DURATION1, 1});
       *end_us = now + idle_us;
       return capture;
     }
@@ -496,7 +502,7 @@ class SimPort : public Port {
     uint64_t rx_end = 0;
     if (this->rx_armed_) {
       if (this->stuck_low) {
-        section.capture = {Symbol{static_cast<uint16_t>(this->rx_idle_us_), 0, 0, 0}};
+        section.capture = {Symbol{0, 0, STALE_DURATION1, 1}};
         rx_end = this->rx_idle_us_;
       } else {
         section.capture = build_capture(phases, this->rx_idle_us_, &rx_end);
@@ -760,6 +766,10 @@ constexpr uint64_t ROM_B = 0x2200000000123428ULL;
 
 struct Rig {
   explicit Rig(size_t mem_words = 64) : port(mem_words), engine(&port, mem_words), mem_words_(mem_words) {
+    this->port.attach(&this->engine);
+  }
+  Rig(size_t mem_words, const Timing &timing)
+      : port(mem_words), engine(&port, mem_words, timing), mem_words_(mem_words) {
     this->port.attach(&this->engine);
   }
   ~Rig() {

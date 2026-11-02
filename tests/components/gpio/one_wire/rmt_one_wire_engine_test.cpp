@@ -925,18 +925,20 @@ TEST(RmtOneWireEngine, Errors_NoDeviceIsNoPresenceAndStopsAfterTheReset) {
 
 TEST(RmtOneWireEngine, Errors_WireToGndAfterPrecheckIsBusLow) {
   // The precheck saw High, the wire goes to GND during the reset: the capture ends on Low
-  Rig rig;
-  add_scratchpad_device(rig);
-  rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
-    if (section == 0)
-      capture = {Symbol{600, 0, 0, 0}};
-  };
-  DoneLog log;
-  Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
-  ASSERT_TRUE(rig.engine.submit(&job.t));
-  rig.pump();
-  EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::BUS_LOW}}));
-  EXPECT_EQ(rig.port.summary(), "RESET");
+  for (const Symbol &held : {Symbol{600, 0, 0, 0}, Symbol{0, 0, STALE_DURATION1, 1}, Symbol{0, 0, 0, 1}}) {
+    Rig rig;
+    add_scratchpad_device(rig);
+    rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
+      if (section == 0)
+        capture = {held};
+    };
+    DoneLog log;
+    Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+    ASSERT_TRUE(rig.engine.submit(&job.t));
+    rig.pump();
+    EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::BUS_LOW}})) << held.duration0 << "/" << held.duration1;
+    EXPECT_EQ(rig.port.summary(), "RESET");
+  }
 }
 
 TEST(RmtOneWireEngine, Errors_LineStuckBeforeTheStartIsBusLow) {
@@ -1000,20 +1002,32 @@ TEST(RmtOneWireEngine, Errors_LineToGndDuringReadIsCaptureError) {
 }
 
 TEST(RmtOneWireEngine, Errors_LineToGndInTheLastSlotIsCaptureError) {
-  // Section 7: the symbol count is right and the first bits are fine, only the end is on Low
+  // Section 7: the symbol count is right and the first bits are fine, only the end is on Low. The
+  // form behind a complete capture is the one that no slot rule can catch.
   for (size_t failing_section : {size_t{3}, size_t{4}}) {
-    Rig rig;
-    add_scratchpad_device(rig);
-    rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
-      if (section == failing_section)
-        capture.back() = Symbol{100, 0, 0, 0};
-    };
-    DoneLog log;
-    Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
-    ASSERT_TRUE(rig.engine.submit(&job.t));
-    rig.pump();
-    EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::CAPTURE_ERROR}})) << "section " << failing_section;
-    EXPECT_EQ(rig.port.sections.size(), failing_section + 1);
+    for (uint16_t stale : {STALE_DURATION1, uint16_t{0}}) {
+      for (bool behind : {false, true}) {
+        const Symbol ends_on_low{0, 0, stale, 1};
+        Rig rig;
+        add_scratchpad_device(rig);
+        rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
+          if (section != failing_section)
+            return;
+          if (behind) {
+            capture.push_back(ends_on_low);
+          } else {
+            capture.back() = ends_on_low;
+          }
+        };
+        DoneLog log;
+        Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+        ASSERT_TRUE(rig.engine.submit(&job.t));
+        rig.pump();
+        EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::CAPTURE_ERROR}}))
+            << "section " << failing_section << " stale " << stale << " behind " << behind;
+        EXPECT_EQ(rig.port.sections.size(), failing_section + 1);
+      }
+    }
   }
 }
 
@@ -1199,14 +1213,17 @@ bool section_capture_is_valid(const Section &section) {
   const size_t expected = section.tx.size();
   if (section.capture.size() < expected)
     return false;
-  if (!section.capture.empty() && section.capture.back().level1 == 0)
-    return false;
+  if (!section.capture.empty()) {
+    const Symbol &last = section.capture.back();
+    if ((last.duration0 == 0 && last.level0 == 0) || last.level1 == 0)
+      return false;
+  }
   for (size_t i = 0; i < expected; i++) {
     if (section.capture[i].level0 != 0 || section.capture[i].duration0 == 0 || section.capture[i].duration0 >= 80)
       return false;
   }
   for (size_t i = expected; i < section.capture.size(); i++) {
-    if (section.capture[i].duration0 != 0 || section.capture[i].duration1 != 0)
+    if (section.capture[i].duration0 != 0 || section.capture[i].duration1 != 0 || section.capture[i].level0 != 1)
       return false;
   }
   return true;
@@ -1237,7 +1254,7 @@ TEST_P(RmtOneWireFuzz, I5_OkOnlyWithACompleteDecode) {
     rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
       if (section == 0 || rig.port.sections[section].tx.empty())
         return;
-      switch (rng() % 10) {
+      switch (rng() % 14) {
         case 0:
           capture.resize(rng() % (capture.size() + 1));
           break;
@@ -1258,6 +1275,16 @@ TEST_P(RmtOneWireFuzz, I5_OkOnlyWithACompleteDecode) {
         case 5:
           if (!capture.empty())
             capture[rng() % capture.size()].duration0 = 80 + rng() % 100;
+          break;
+        case 6:
+          if (!capture.empty())
+            capture.back() = Symbol{0, 0, static_cast<uint16_t>(rng() % 3 == 0 ? 0 : rng() % 32768), 1};
+          break;
+        case 7:
+          capture.push_back(Symbol{0, 0, static_cast<uint16_t>(rng() % 3 == 0 ? 0 : rng() % 32768), 1});
+          break;
+        case 8:
+          capture.push_back(Symbol{0, 1, 0, 1});
           break;
         default:
           break;
@@ -1291,6 +1318,171 @@ TEST_P(RmtOneWireFuzz, I5_OkOnlyWithACompleteDecode) {
   }
   EXPECT_GT(ok, 100);
   EXPECT_GT(errors, 100);
+}
+
+// ---- Timing, section 4.6 and section 15 --------------------------------------------------------
+
+namespace {
+
+/// Every armed section has the RX idle of section 4.3, the RESET section stays at 600 us.
+void expect_rx_idle(const SimPort &port, uint32_t idle_us) {
+  int resets = 0;
+  int others = 0;
+  for (size_t i = 0; i < port.sections.size(); i++) {
+    const auto &section = port.sections[i];
+    if (!section.armed)
+      continue;
+    if (section.is_reset()) {
+      resets++;
+      EXPECT_EQ(section.idle_us, 600u) << "section " << i;
+    } else {
+      others++;
+      EXPECT_EQ(section.idle_us, idle_us) << "section " << i;
+    }
+  }
+  EXPECT_GT(resets, 0);
+  EXPECT_GT(others, 0);
+}
+
+/// Runs READ_SCRATCHPAD against one device, the result must be OK with the right data.
+void read_scratchpad_ok(Rig &rig) {
+  add_scratchpad_device(rig);
+  DoneLog log;
+  Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+  ASSERT_TRUE(rig.engine.submit(&job.t));
+  rig.pump();
+  EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::OK}}));
+  EXPECT_EQ(job.read_bytes, PAYLOAD);
+}
+
+}  // namespace
+
+TEST(RmtOneWireEngine, Timing_DefaultRxIdleIs100) {
+  Rig rig;
+  read_scratchpad_ok(rig);
+  expect_rx_idle(rig.port, 100);
+}
+
+TEST(RmtOneWireEngine, Timing_RxIdleIsSlotPlus20WithAFloorOf100) {
+  // Slot 80 keeps I13 unchanged, a floor of 100 only ends at slot 81
+  const struct {
+    uint8_t write0_low;
+    uint8_t slot;
+    uint32_t idle;
+  } cases[] = {{60, 71, 100}, {65, 80, 100}, {65, 81, 101}, {65, 100, 120}, {90, 120, 140}};
+  for (const auto &entry : cases) {
+    SCOPED_TRACE(static_cast<int>(entry.slot));
+    Rig rig(64, Timing{entry.write0_low, entry.slot, 13});
+    read_scratchpad_ok(rig);
+    expect_rx_idle(rig.port, entry.idle);
+  }
+}
+
+TEST(RmtOneWireEngine, Timing_ReachesTheWire) {
+  Rig rig(64, Timing{90, 120, 13});
+  read_scratchpad_ok(rig);
+  int zeros = 0;
+  int ones = 0;
+  int reads = 0;
+  for (const auto &section : rig.port.sections) {
+    if (section.is_reset()) {
+      EXPECT_EQ(section.tx[0].duration0, 500);
+      EXPECT_EQ(section.tx[0].duration1, 500);
+      continue;
+    }
+    for (const auto &symbol : section.tx) {
+      EXPECT_EQ(symbol.duration0 + symbol.duration1, 120);
+      if (section.armed) {
+        reads++;
+        EXPECT_EQ(symbol.duration0, 4);
+      } else if (symbol.duration0 == 90) {
+        zeros++;
+      } else {
+        ones++;
+        EXPECT_EQ(symbol.duration0, 6);
+      }
+    }
+  }
+  EXPECT_GT(zeros, 0);
+  EXPECT_GT(ones, 0);
+  EXPECT_EQ(reads, 72);
+}
+
+TEST(RmtOneWireEngine, Timing_ThresholdReachesTheDecoder) {
+  // A slow rise: the Low time of a 1 is 4 + 18 = 22 us, a 0 of the device 40 us
+  auto setup_bus = [](Rig &rig) {
+    rig.port.bus.rise_us = 18;
+    auto &device = rig.port.bus.devices.emplace_back(ROM_A, PAYLOAD, 1);
+    device.zero_low_us = 40;
+  };
+  {
+    Rig rig(64, Timing{65, 80, 25});
+    setup_bus(rig);
+    DoneLog log;
+    Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+    ASSERT_TRUE(rig.engine.submit(&job.t));
+    rig.pump();
+    EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::OK}}));
+    EXPECT_EQ(job.read_bytes, PAYLOAD);
+  }
+  {
+    // Counter-check on the same bus: with the default threshold every bit reads as 0
+    Rig rig;
+    setup_bus(rig);
+    DoneLog log;
+    Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+    ASSERT_TRUE(rig.engine.submit(&job.t));
+    rig.pump();
+    EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::OK}}));
+    EXPECT_EQ(job.read_bytes, std::vector<uint8_t>(9, 0x00));
+  }
+}
+
+TEST(RmtOneWireEngine, Timing_SlotLimitReachesTheDecoder) {
+  // Errors_LowTimeLimitIn79Out80 with slot 120
+  const std::vector<uint8_t> ones(9, 0xFF);
+  for (size_t patched_section : {size_t{3}, size_t{4}}) {
+    for (uint16_t low : {uint16_t{119}, uint16_t{120}}) {
+      Rig rig(64, Timing{90, 120, 13});
+      rig.port.bus.devices.emplace_back(ROM_A, ones, 1);
+      rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
+        if (section == patched_section)
+          capture[5].duration0 = low;
+      };
+      DoneLog log;
+      Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
+      ASSERT_TRUE(rig.engine.submit(&job.t));
+      rig.pump();
+      const TransactionStatus expected = low < 120 ? TransactionStatus::OK : TransactionStatus::CAPTURE_ERROR;
+      EXPECT_EQ(log, (DoneLog{{1, expected}})) << "section " << patched_section << " low " << low;
+    }
+  }
+}
+
+TEST(RmtOneWireEngine, Timing_BlockingMethodsAndSearchUseIt) {
+  constexpr uint8_t SKIP_ROM = 0xCC;
+  constexpr uint8_t SEARCH_ROM = 0xF0;
+  Rig rig(64, Timing{90, 120, 13});
+  rig.port.bus.devices.emplace_back(ROM_A, PAYLOAD, 0);
+
+  ASSERT_EQ(rig.engine.reset_blocking(), 1);
+  ASSERT_TRUE(rig.engine.write_blocking(&SKIP_ROM, 8));
+  uint8_t data = 0;
+  ASSERT_TRUE(rig.engine.read_blocking(&data, 8));
+  EXPECT_EQ(data, PAYLOAD[0]);
+
+  rig.engine.reset_search();
+  ASSERT_EQ(rig.engine.reset_blocking(), 1);
+  ASSERT_TRUE(rig.engine.write_blocking(&SEARCH_ROM, 8));
+  EXPECT_EQ(rig.engine.search_next(), ROM_A);
+
+  expect_rx_idle(rig.port, 140);
+  for (const auto &section : rig.port.sections) {
+    if (section.is_reset())
+      continue;
+    for (const auto &symbol : section.tx)
+      EXPECT_EQ(symbol.duration0 + symbol.duration1, 120);
+  }
 }
 
 }  // namespace esphome::gpio::rmt_one_wire::testing

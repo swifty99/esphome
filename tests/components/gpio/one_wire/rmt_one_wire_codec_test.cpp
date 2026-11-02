@@ -28,18 +28,22 @@ std::vector<Symbol> capture_of(const std::vector<bool> &bits) {
 }
 
 /// The decoder rule of section 7, as the test understands it. Levels of the second half are only
-/// generated as Low for the last symbol, "ends on Low" then means its level1.
+/// generated as Low for the last symbol. Point 4, "ends on Low": the last symbol has an empty Low
+/// first half, whatever its duration1 and level1 say, or its level1 is 0.
 bool capture_is_valid(const std::vector<Symbol> &capture, size_t expected) {
   if (capture.size() < expected)
     return false;
-  if (!capture.empty() && capture.back().level1 == 0)
-    return false;
+  if (!capture.empty()) {
+    const Symbol &last = capture.back();
+    if ((last.duration0 == 0 && last.level0 == 0) || last.level1 == 0)
+      return false;
+  }
   for (size_t i = 0; i < expected; i++) {
     if (capture[i].level0 != 0 || capture[i].duration0 == 0 || capture[i].duration0 >= 80)
       return false;
   }
   for (size_t i = expected; i < capture.size(); i++) {
-    if (capture[i].duration0 != 0 || capture[i].duration1 != 0)
+    if (capture[i].duration0 != 0 || capture[i].duration1 != 0 || capture[i].level0 != 1)
       return false;
   }
   return true;
@@ -188,7 +192,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(
         ResetCase{"TypicalPresence", {{503, 0, 27, 1}, {120, 0, 0, 1}}, ResetResult::PRESENT},
         ResetCase{
-            "PresenceFollowedByEndMarker", {{503, 0, 27, 1}, {120, 0, 500, 1}, {0, 0, 0, 1}}, ResetResult::PRESENT},
+            "PresenceFollowedByEndMarker", {{503, 0, 27, 1}, {120, 0, 500, 1}, {0, 1, 0, 1}}, ResetResult::PRESENT},
+        ResetCase{"PresenceThenEndsOnLow", {{503, 0, 27, 1}, {120, 0, 500, 1}, {0, 0, 0, 1}}, ResetResult::BUS_LOW},
         ResetCase{"ShortestPresence", {{503, 0, 27, 1}, {15, 0, 0, 1}}, ResetResult::PRESENT},
         ResetCase{"TooShortForPresence", {{503, 0, 27, 1}, {14, 0, 0, 1}}, ResetResult::NO_DEVICE},
         ResetCase{"LatestPresence", {{503, 0, 300, 1}, {60, 0, 0, 1}}, ResetResult::PRESENT},
@@ -204,6 +209,11 @@ INSTANTIATE_TEST_SUITE_P(
         ResetCase{"EndsOnLowAfterLongPulse", {{503, 0, 27, 1}, {600, 0, 0, 0}}, ResetResult::BUS_LOW},
         ResetCase{"EndsOnShortLow", {{503, 0, 27, 1}, {120, 0, 0, 0}}, ResetResult::BUS_LOW},
         ResetCase{"EndsOnLowZeroDuration", {{503, 0, 27, 1}, {0, 0, 0, 0}}, ResetResult::BUS_LOW},
+        // Section 7 point 4, as the S3 stores it: duration1 is not a time and is never evaluated
+        ResetCase{"OnlySymbolEndsOnLowStale74", {{0, 0, 74, 1}}, ResetResult::BUS_LOW},
+        ResetCase{"OnlySymbolEndsOnLowStale75", {{0, 0, 75, 1}}, ResetResult::BUS_LOW},
+        ResetCase{"OnlySymbolEndsOnLowStale0", {{0, 0, 0, 1}}, ResetResult::BUS_LOW},
+        ResetCase{"ResetThenEndsOnLowStale91", {{503, 0, 27, 1}, {0, 0, 91, 1}}, ResetResult::BUS_LOW},
         ResetCase{"EmptyCapture", {}, ResetResult::CAPTURE_ERROR},
         ResetCase{"StartsHigh", {{503, 1, 27, 0}, {120, 1, 0, 0}}, ResetResult::CAPTURE_ERROR}),
     [](const ::testing::TestParamInfo<ResetCase> &info) { return info.param.name; });
@@ -270,14 +280,29 @@ TEST(RmtOneWireCodec, I5_CompleteCaptureShapesAreAccepted) {
   EXPECT_TRUE(decode_read_slots(full_last.data(), full_last.size(), 3, &out, 0));
   EXPECT_EQ(out, 0b101);
 
-  for (const Symbol &marker : {Symbol{0, 0, 0, 1}, Symbol{0, 1, 0, 1}}) {
-    auto with_marker = full_last;
-    with_marker.push_back(marker);
-    with_marker.push_back(marker);
-    out = 0;
-    EXPECT_TRUE(decode_read_slots(with_marker.data(), with_marker.size(), 3, &out, 0));
-    EXPECT_EQ(out, 0b101);
-  }
+  const Symbol marker{0, 1, 0, 1};
+  auto with_marker = full_last;
+  with_marker.push_back(marker);
+  with_marker.push_back(marker);
+  out = 0;
+  EXPECT_TRUE(decode_read_slots(with_marker.data(), with_marker.size(), 3, &out, 0));
+  EXPECT_EQ(out, 0b101);
+
+  // Section 7 points 4 and 5: starting Low it is no end marker, even with both durations 0
+  const Symbol ends_on_low{0, 0, 0, 1};
+  auto with_low = full_last;
+  with_low.push_back(ends_on_low);
+  EXPECT_FALSE(decode_read_slots(with_low.data(), with_low.size(), 3, &out, 0));
+  with_low.push_back(ends_on_low);
+  EXPECT_FALSE(decode_read_slots(with_low.data(), with_low.size(), 3, &out, 0));
+  auto low_then_marker = full_last;
+  low_then_marker.push_back(ends_on_low);
+  low_then_marker.push_back(marker);
+  EXPECT_FALSE(decode_read_slots(low_then_marker.data(), low_then_marker.size(), 3, &out, 0));
+  auto marker_then_low = full_last;
+  marker_then_low.push_back(marker);
+  marker_then_low.push_back(ends_on_low);
+  EXPECT_FALSE(decode_read_slots(marker_then_low.data(), marker_then_low.size(), 3, &out, 0));
 }
 
 TEST(RmtOneWireCodec, I5_LowTimeMustBeShorterThanASlot) {
@@ -321,6 +346,22 @@ TEST(RmtOneWireCodec, I5_CaptureEndingOnLowIsInvalid) {
   auto capture = capture_of(bits);
   capture.push_back(Symbol{0, 0, 0, 0});
   EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), &out, 0));
+
+  // The form the S3 stores: Low first half with no time, duration1 is whatever was in the memory
+  for (uint16_t stale : {uint16_t{74}, uint16_t{75}, uint16_t{91}, uint16_t{0}}) {
+    const Symbol ends_on_low{0, 0, stale, 1};
+    auto replaced = capture_of(bits);
+    replaced.back() = ends_on_low;
+    EXPECT_FALSE(decode_read_slots(replaced.data(), replaced.size(), bits.size(), &out, 0)) << stale;
+    EXPECT_FALSE(decode_read_slots(&ends_on_low, 1, 1, &out, 0)) << stale;
+    auto behind = capture_of(bits);
+    behind.push_back(ends_on_low);
+    EXPECT_FALSE(decode_read_slots(behind.data(), behind.size(), bits.size(), &out, 0)) << stale;
+    behind = capture_of(bits);
+    behind.push_back(Symbol{0, 1, 0, 1});
+    behind.push_back(ends_on_low);
+    EXPECT_FALSE(decode_read_slots(behind.data(), behind.size(), bits.size(), &out, 0)) << stale;
+  }
 }
 
 TEST(RmtOneWireCodec, I5_ZeroBitsNeedNoSymbols) {
@@ -371,7 +412,7 @@ TEST(RmtOneWireCodec, I5_SurplusSymbolsWithDurationAreInvalid) {
         << surplus.duration0 << "/" << surplus.duration1;
     // Behind zero-length markers it is still surplus
     capture = capture_of(bits);
-    capture.push_back(Symbol{0, 0, 0, 1});
+    capture.push_back(Symbol{0, 1, 0, 1});
     capture.push_back(surplus);
     EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), out.data(), 0));
   }
@@ -387,7 +428,8 @@ TEST(RmtOneWireCodec, I5_FuzzMutatedCaptures) {
     for (size_t i = 0; i < count; i++)
       bits.push_back(rng() & 1);
     auto capture = capture_of(bits);
-    switch (rng() % 9) {
+    bool ends_on_low = false;
+    switch (rng() % 11) {
       case 0:  // complete
         break;
       case 1:  // truncated
@@ -415,6 +457,14 @@ TEST(RmtOneWireCodec, I5_FuzzMutatedCaptures) {
       case 8:  // longest allowed Low
         capture[rng() % capture.size()].duration0 = 79;
         break;
+      case 9:  // the last symbol ends on Low, duration1 is whatever was in the memory
+        capture.back() = Symbol{0, 0, static_cast<uint16_t>(rng() % 3 == 0 ? 0 : rng() % 32768), 1};
+        ends_on_low = true;
+        break;
+      case 10:  // ends on Low behind a complete capture
+        capture.push_back(Symbol{0, 0, static_cast<uint16_t>(rng() % 3 == 0 ? 0 : rng() % 32768), 1});
+        ends_on_low = true;
+        break;
     }
     const bool valid = capture_is_valid(capture, count);
     std::array<uint8_t, 9> out{};
@@ -422,6 +472,9 @@ TEST(RmtOneWireCodec, I5_FuzzMutatedCaptures) {
     const bool decoded =
         decode_read_slots(capture.empty() ? &unused : capture.data(), capture.size(), count, out.data(), 0);
     ASSERT_EQ(decoded, valid) << "round " << round << " symbols " << capture.size() << " expected " << count;
+    if (ends_on_low) {
+      ASSERT_FALSE(decoded) << "round " << round << ": duration1 " << capture.back().duration1;
+    }
     if (!decoded) {
       rejected++;
       continue;
@@ -460,6 +513,119 @@ TEST(RmtOneWireCodec, I5_FuzzRandomGarbage) {
       for (size_t i = 0; i < expected; i++)
         ASSERT_EQ(get_bit(out.data(), i), capture[i].duration0 < 13) << "round " << round << " bit " << i;
     }
+  }
+}
+
+// ---- Timing, section 4.6 and section 15 --------------------------------------------------------
+
+namespace {
+
+void expect_same_symbol(const Symbol &a, const Symbol &b) {
+  EXPECT_EQ(a.duration0, b.duration0);
+  EXPECT_EQ(a.level0, b.level0);
+  EXPECT_EQ(a.duration1, b.duration1);
+  EXPECT_EQ(a.level1, b.level1);
+}
+
+void expect_slot(const Symbol &slot, uint16_t low, uint16_t high) {
+  EXPECT_EQ(slot.duration0, low);
+  EXPECT_EQ(slot.level0, 0);
+  EXPECT_EQ(slot.duration1, high);
+  EXPECT_EQ(slot.level1, 1);
+}
+
+}  // namespace
+
+TEST(RmtOneWireCodec, Timing_DefaultsAreTheSpecValues) {
+  const Timing timing;
+  EXPECT_EQ(timing.write0_low_us, 65);
+  EXPECT_EQ(timing.slot_us, 80);
+  EXPECT_EQ(timing.read_threshold_us, 13);
+}
+
+TEST(RmtOneWireCodec, Timing_NoArgumentEncodesLikeTheSpecValues) {
+  const Timing spec_values{65, 80, 13};
+  for (int value = 0; value < 256; value++) {
+    const uint8_t byte = static_cast<uint8_t>(value);
+    std::array<Symbol, 8> without{};
+    std::array<Symbol, 8> with{};
+    ASSERT_EQ(encode_write_slots(&byte, 0, 8, without.data()), 8u);
+    ASSERT_EQ(encode_write_slots(&byte, 0, 8, with.data(), spec_values), 8u);
+    for (size_t bit = 0; bit < 8; bit++)
+      expect_same_symbol(without[bit], with[bit]);
+  }
+  std::array<Symbol, 8> without{};
+  std::array<Symbol, 8> with{};
+  ASSERT_EQ(encode_read_slots(8, without.data()), 8u);
+  ASSERT_EQ(encode_read_slots(8, with.data(), spec_values), 8u);
+  for (size_t bit = 0; bit < 8; bit++)
+    expect_same_symbol(without[bit], with[bit]);
+}
+
+TEST(RmtOneWireCodec, Timing_NoArgumentDecodesLikeTheSpecValues) {
+  const Timing spec_values{65, 80, 13};
+  for (uint16_t low = 1; low < 100; low++) {
+    const Symbol capture{low, 0, 0, 1};
+    uint8_t without = 0x55;
+    uint8_t with = 0x55;
+    const bool result_without = decode_read_slots(&capture, 1, 1, &without, 0);
+    const bool result_with = decode_read_slots(&capture, 1, 1, &with, 0, spec_values);
+    EXPECT_EQ(result_without, result_with) << "Low time " << low;
+    if (result_without) {
+      EXPECT_EQ(without & 1, with & 1) << "Low time " << low;
+    }
+  }
+}
+
+TEST(RmtOneWireCodec, Timing_LongSlotChangesTheEncodedSymbols) {
+  // Write 1 Low and Read Low stay fixed, the High times are the slot minus the Low time
+  const Timing timing{90, 120, 13};
+  const uint8_t ones = 0xFF;
+  const uint8_t zeros = 0x00;
+  Symbol one{};
+  Symbol zero{};
+  Symbol read{};
+  ASSERT_EQ(encode_write_slots(&zeros, 0, 1, &zero, timing), 1u);
+  ASSERT_EQ(encode_write_slots(&ones, 0, 1, &one, timing), 1u);
+  ASSERT_EQ(encode_read_slots(1, &read, timing), 1u);
+  expect_slot(zero, 90, 30);
+  expect_slot(one, 6, 114);
+  expect_slot(read, 4, 116);
+}
+
+TEST(RmtOneWireCodec, Timing_ThresholdDecidesTheBit) {
+  const Timing timing{65, 80, 25};
+  for (uint16_t low : {uint16_t{13}, uint16_t{24}}) {
+    const Symbol capture{low, 0, 0, 1};
+    uint8_t out = 0x00;
+    ASSERT_TRUE(decode_read_slots(&capture, 1, 1, &out, 0, timing)) << low;
+    EXPECT_EQ(out & 1, 1) << "Low time " << low;
+  }
+  for (uint16_t low : {uint16_t{25}, uint16_t{26}}) {
+    const Symbol capture{low, 0, 0, 1};
+    uint8_t out = 0xFF;
+    ASSERT_TRUE(decode_read_slots(&capture, 1, 1, &out, 0, timing)) << low;
+    EXPECT_EQ(out & 1, 0) << "Low time " << low;
+  }
+}
+
+TEST(RmtOneWireCodec, Timing_SlotLimitsTheLowTime) {
+  // Section 7 point 3 follows Timing::slot_us, at every position
+  const Timing timing{90, 120, 13};
+  const std::vector<bool> bits{true, true, true, true};
+  for (size_t position = 0; position < bits.size(); position++) {
+    auto capture = capture_of(bits);
+    uint8_t out = 0;
+    for (uint16_t low : {uint16_t{80}, uint16_t{119}}) {
+      capture[position].duration0 = low;
+      out = 0;
+      ASSERT_TRUE(decode_read_slots(capture.data(), capture.size(), bits.size(), &out, 0, timing))
+          << "position " << position << " low " << low;
+      EXPECT_EQ(out, 0x0F & ~(1u << position)) << "position " << position << " low " << low;
+    }
+    capture[position].duration0 = 120;
+    EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), &out, 0, timing))
+        << "position " << position;
   }
 }
 

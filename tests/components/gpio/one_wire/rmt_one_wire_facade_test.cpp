@@ -242,9 +242,11 @@ TEST(RmtOneWireFacade, ResetBusLow) {
 }
 
 TEST(RmtOneWireFacade, ResetBusLowDuringThePulse) {
-  Rig rig;
-  rig.port.capture_mutator = [](size_t, std::vector<Symbol> &capture) { capture = {Symbol{600, 0, 0, 0}}; };
-  EXPECT_EQ(rig.engine.reset_blocking(), -1);
+  for (const Symbol &held : {Symbol{600, 0, 0, 0}, Symbol{0, 0, STALE_DURATION1, 1}, Symbol{0, 0, 0, 1}}) {
+    Rig rig;
+    rig.port.capture_mutator = [&](size_t, std::vector<Symbol> &capture) { capture = {held}; };
+    EXPECT_EQ(rig.engine.reset_blocking(), -1) << held.duration0 << "/" << held.duration1;
+  }
 }
 
 TEST(RmtOneWireFacade, ResetCaptureErrorIsFailure) {
@@ -815,7 +817,7 @@ void run_search_failure(SearchFailure failure) {
     case SearchFailure::ENDS_ON_LOW:
       rig.port.capture_mutator = [=](size_t section, std::vector<Symbol> &capture) {
         if (static_cast<int>(section) == fail_at)
-          capture.back() = Symbol{100, 0, 0, 0};
+          capture.back() = Symbol{0, 0, STALE_DURATION1, 1};
       };
       break;
     case SearchFailure::LOW_OF_A_SLOT:

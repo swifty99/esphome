@@ -82,7 +82,8 @@ TEST(RmtOneWireSim, IdleBelowResetLowEndsInsideThePulse) {
   uint64_t end = 0;
   const auto capture = build_capture(phases, 320, &end);
   ASSERT_EQ(capture.size(), 1u);
-  expect_symbol(capture[0], 320, 0, 0);
+  expect_symbol(capture[0], 0, STALE_DURATION1, 1);
+  EXPECT_EQ(end, 320u);
 }
 
 TEST(RmtOneWireSim, ShortResetIsNotSeen) {
@@ -179,6 +180,18 @@ TEST(RmtOneWireSim, CaptureEndsWhenAHighPhaseReachesIdle) {
   ASSERT_EQ(too_short.size(), 1u) << "the following edges are not recorded";
   expect_symbol(too_short[0], 4, 0, 1);
   EXPECT_EQ(end, 54u);
+}
+
+TEST(RmtOneWireSim, CaptureEndsWhenALowPhaseReachesIdle) {
+  // S2 of the S3 probe: two slots, then the line stays Low
+  std::vector<Phase> phases{{true, 4}, {false, 76}, {true, 4}, {false, 76}, {true, 2000}};
+  uint64_t end = 0;
+  const auto capture = build_capture(phases, 100, &end);
+  ASSERT_EQ(capture.size(), 3u);
+  expect_symbol(capture[0], 4, 76, 1);
+  expect_symbol(capture[1], 4, 76, 1);
+  expect_symbol(capture[2], 0, STALE_DURATION1, 1);
+  EXPECT_EQ(end, 260u);
 }
 
 TEST(RmtOneWireSim, ClassificationFollowsSection3) {

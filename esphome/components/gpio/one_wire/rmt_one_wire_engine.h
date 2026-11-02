@@ -30,7 +30,8 @@ class Port {
 
 class Engine {
  public:
-  Engine(Port *port, size_t mem_words);
+  /// RX idle outside RESET: max(100, slot + 20) us. The RESET section keeps 600 us.
+  Engine(Port *port, size_t mem_words, const Timing &timing = {});
 
   // Main loop only
   bool submit(one_wire::Transaction *transaction);
