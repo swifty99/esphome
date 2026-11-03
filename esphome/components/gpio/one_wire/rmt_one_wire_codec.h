@@ -37,9 +37,8 @@ size_t encode_write_slots(const uint8_t *data, size_t bit_offset, size_t num_bit
 size_t encode_read_slots(size_t num_bits, Symbol *out, const Timing &timing = {});
 /// Only OK (presence), NO_PRESENCE, BUS_LOW or CAPTURE_ERROR.
 one_wire::TransactionStatus decode_reset(const Symbol *capture, size_t count);
-/// Stores num_bits at bit_offset of out, LSB first. False unless the capture is num_bits Low-then-High symbols,
-/// each Low shorter than a slot, followed by end markers only. out is then undefined.
-/// Only the bits being decoded may be changed.
+/// Stores num_bits at bit_offset of out, LSB first, changing no other bit. False, with out undefined, unless the
+/// capture is num_bits Low-then-High symbols, each Low shorter than a slot, followed by end markers only.
 bool decode_read_slots(const Symbol *capture, size_t count, size_t num_bits, uint8_t *out, size_t bit_offset,
                        const Timing &timing = {});
 

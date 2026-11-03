@@ -5,8 +5,6 @@
 #ifdef USE_ONE_WIRE_RMT
 
 #include <atomic>
-#include <cstddef>
-#include <cstdint>
 
 #include "esphome/components/one_wire/one_wire_bus.h"
 #include "rmt_one_wire_codec.h"

@@ -84,7 +84,6 @@ CONFIG_SCHEMA = cv.All(
 async def to_code(config: ConfigType) -> None:
     args = []
     if timing := config.get(CONF_RMT_TIMING):
-        # In declaration order: the schema yields the user's keys first
         fields = ((f"{key}_us", timing[key].total_microseconds) for key in RMT_TIMING)
         args.append(cg.StructInitializer(Timing, *fields))
     var = cg.new_Pvariable(config[CONF_ID], *args)
