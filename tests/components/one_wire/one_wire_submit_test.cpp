@@ -3,7 +3,6 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
-#include <string>
 #include <vector>
 
 #include "esphome/components/one_wire/one_wire_bus.h"
@@ -13,16 +12,20 @@ namespace esphome::one_wire::testing {
 constexpr uint64_t ROM = 0x120000065C17EE28ULL;
 const std::vector<uint8_t> COMMAND{0x4E, 0x01, 0x02};
 
+// What went over the bus. Below 256: a written byte.
+enum Op : int { RESET = 256, WRITE_ROM, WRITE_OTHER_WORD, READ };
+using Ops = std::vector<int>;
+
 /// Records what goes over the bus, and answers reads with 0xA0, 0xA1, ...
 class FakeBus final : public OneWireBus {
  public:
   int presence{1};
-  std::vector<std::string> ops;
+  Ops ops;
 
-  void write8(uint8_t val) override { this->ops.push_back("w" + std::to_string(val)); }
-  void write64(uint64_t val) override { this->ops.push_back(val == ROM ? "rom" : "wrong rom"); }
+  void write8(uint8_t val) override { this->ops.push_back(val); }
+  void write64(uint64_t val) override { this->ops.push_back(val == ROM ? WRITE_ROM : WRITE_OTHER_WORD); }
   uint8_t read8() override {
-    this->ops.emplace_back("r");
+    this->ops.push_back(READ);
     return this->next_read_++;
   }
   uint64_t read64() override {
@@ -32,7 +35,7 @@ class FakeBus final : public OneWireBus {
 
  protected:
   int reset_int() override {
-    this->ops.emplace_back("reset");
+    this->ops.push_back(RESET);
     return this->presence;
   }
   void reset_search() override {}
@@ -75,7 +78,7 @@ class SubmitDefault : public ::testing::Test {
 TEST_F(SubmitDefault, MatchRomThenWriteThenRead) {
   EXPECT_TRUE(this->bus_.submit(&this->transaction_));
 
-  const std::vector<std::string> expected{"reset", "w85", "rom", "w78", "w1", "w2", "r", "r", "r"};
+  const Ops expected{RESET, 0x55, WRITE_ROM, 0x4E, 0x01, 0x02, READ, READ, READ};
   EXPECT_EQ(this->bus_.ops, expected);
   EXPECT_EQ(this->done_.calls, std::vector<TransactionStatus>{TransactionStatus::OK});
 }
@@ -84,7 +87,7 @@ TEST_F(SubmitDefault, AddressZeroIsSkipRom) {
   this->transaction_.address = 0;
   EXPECT_TRUE(this->bus_.submit(&this->transaction_));
 
-  const std::vector<std::string> expected{"reset", "w204", "w78", "w1", "w2", "r", "r", "r"};
+  const Ops expected{RESET, 0xCC, 0x4E, 0x01, 0x02, READ, READ, READ};
   EXPECT_EQ(this->bus_.ops, expected);
   EXPECT_EQ(this->done_.calls, std::vector<TransactionStatus>{TransactionStatus::OK});
 }
@@ -101,7 +104,7 @@ TEST_F(SubmitDefault, NoPresenceTouchesNothingAfterTheReset) {
   this->bus_.presence = 0;
   EXPECT_TRUE(this->bus_.submit(&this->transaction_));
 
-  EXPECT_EQ(this->bus_.ops, std::vector<std::string>{"reset"});
+  EXPECT_EQ(this->bus_.ops, Ops{RESET});
   EXPECT_EQ(this->done_.calls, std::vector<TransactionStatus>{TransactionStatus::NO_PRESENCE});
   EXPECT_EQ(this->read_[0], 0);
 }
@@ -110,7 +113,7 @@ TEST_F(SubmitDefault, HeldLowReadsAsNoPresence) {
   this->bus_.presence = -1;
   EXPECT_TRUE(this->bus_.submit(&this->transaction_));
 
-  EXPECT_EQ(this->bus_.ops, std::vector<std::string>{"reset"});
+  EXPECT_EQ(this->bus_.ops, Ops{RESET});
   EXPECT_EQ(this->done_.calls, std::vector<TransactionStatus>{TransactionStatus::NO_PRESENCE});
 }
 
