@@ -8,7 +8,7 @@ using one_wire::TransactionStatus;
 
 // Sent values in us: inside TI TMP1826 (SBOSA45D, table 7.6, standard mode) and the DS18B20 AC table.
 // The Low times are how long the master drives the line, the rise time comes on top.
-static constexpr uint16_t RESET_LOW_US = 500;   // tRSTL 480-560, keeps a margin to the minimum
+static constexpr uint16_t RESET_LOW_US = 520;   // middle of tRSTL 480-560
 static constexpr uint16_t RESET_HIGH_US = 500;  // tRSTH >= 480
 static constexpr uint8_t WRITE1_LOW_US = 6;     // tWR1L 2-15, TI SPMA057E: "typical about 6 us"
 static constexpr uint8_t READ_LOW_US = 4;       // tRL 2.5-5

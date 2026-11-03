@@ -823,7 +823,7 @@ void run_search_failure(SearchFailure failure) {
     case SearchFailure::LOW_OF_A_SLOT:
       rig.port.capture_mutator = [=](size_t section, std::vector<Symbol> &capture) {
         if (static_cast<int>(section) == fail_at)
-          capture[1].duration0 = 80;
+          capture[1].duration0 = 110;
       };
       break;
     case SearchFailure::TIMEOUT:

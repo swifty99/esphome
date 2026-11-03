@@ -25,8 +25,8 @@ constexpr size_t max_rx_slots(size_t mem_words) { return mem_words - 2; }
 /// Values that a bus may override. Ranges are checked in the Python schema, and the defaults there must match.
 /// Write 1 Low, Read Low and the reset stay fixed. High times: slot minus Low time.
 struct Timing {
-  uint8_t write0_low_us{65};
-  uint8_t slot_us{80};
+  uint8_t write0_low_us{90};
+  uint8_t slot_us{110};
   uint8_t read_threshold_us{13};
 };
 

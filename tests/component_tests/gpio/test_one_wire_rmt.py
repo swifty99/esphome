@@ -202,7 +202,8 @@ def test_rmt_timing_rejects_values_out_of_range(
     [
         ({"write0_low": "69us", "slot": "80us"}, True),
         ({"write0_low": "70us", "slot": "80us"}, False),
-        ({"write0_low": "80us"}, False),
+        ({"write0_low": "99us"}, True),
+        ({"write0_low": "100us"}, False),
     ],
 )
 def test_rmt_timing_keeps_recovery_after_a_written_0(
@@ -216,9 +217,9 @@ def test_rmt_timing_error_names_the_effective_values(
     validate: Callable[[str], Config],
 ) -> None:
     """Only write0_low is set here, but the default of slot is what makes it invalid."""
-    result = validate(_yaml(ESP32_S3_IDF, USE_RMT + _timing(write0_low="80us")))
+    result = validate(_yaml(ESP32_S3_IDF, USE_RMT + _timing(write0_low="100us")))
 
-    assert "slot 80us needs at least write0_low 80us + 11us" in _error_text(result)
+    assert "slot 110us needs at least write0_low 100us + 11us" in _error_text(result)
     assert result.errors[0].path[-1] == "slot"
 
 
@@ -234,7 +235,7 @@ def test_rmt_timing_defaults_match_the_codec() -> None:
 
 @pytest.mark.parametrize("bus", ["", "    use_rmt: false\n"])
 def test_rmt_timing_needs_use_rmt(validate: Callable[[str], Config], bus: str) -> None:
-    result = validate(_yaml(ESP32_S3_IDF, bus + _timing(slot="100us")))
+    result = validate(_yaml(ESP32_S3_IDF, bus + _timing(slot="110us")))
     assert "rmt_timing needs use_rmt: true" in _error_text(result)
 
 
@@ -253,7 +254,7 @@ def test_rmt_timing_reaches_the_constructor(
     "values",
     [
         {"read_threshold": "15us"},
-        {"slot": "100us"},
+        {"slot": "110us"},
         {"read_threshold": "15us", "slot": "100us", "write0_low": "80us"},
     ],
     ids=["read_threshold_alone", "slot_alone", "swapped_keys"],

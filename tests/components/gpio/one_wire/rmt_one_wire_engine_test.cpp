@@ -1074,7 +1074,7 @@ TEST(RmtOneWireEngine, Errors_LineToGndInTheLastSlotIsCaptureError) {
   }
 }
 
-TEST(RmtOneWireEngine, Errors_LowTimeLimitIn79Out80) {
+TEST(RmtOneWireEngine, Errors_LowTimeLimitIn109Out110) {
   const std::vector<uint8_t> ones(9, 0xFF);
   for (size_t failing_section : {size_t{3}, size_t{4}}) {
     for (bool last_slot : {false, true}) {
@@ -1086,13 +1086,13 @@ TEST(RmtOneWireEngine, Errors_LowTimeLimitIn79Out80) {
         rig.port.bus.devices.emplace_back(ROM_A, ones, 1);
         rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
           if (section == failing_section)
-            patch(capture, 79);
+            patch(capture, 109);
         };
         DoneLog log;
         Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
         ASSERT_TRUE(rig.engine.submit(&job.t));
         rig.pump();
-        EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::OK}})) << "79 us is a slow 0";
+        EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::OK}})) << "109 us is a slow 0";
         int zeros = 0;
         for (auto byte : job.read_bytes) {
           for (int bit = 0; bit < 8; bit++)
@@ -1105,13 +1105,13 @@ TEST(RmtOneWireEngine, Errors_LowTimeLimitIn79Out80) {
         rig.port.bus.devices.emplace_back(ROM_A, ones, 1);
         rig.port.capture_mutator = [&](size_t section, std::vector<Symbol> &capture) {
           if (section == failing_section)
-            patch(capture, 80);
+            patch(capture, 110);
         };
         DoneLog log;
         Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
         ASSERT_TRUE(rig.engine.submit(&job.t));
         rig.pump();
-        EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::CAPTURE_ERROR}})) << "80 us is a held bus";
+        EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::CAPTURE_ERROR}})) << "110 us is a held bus";
       }
     }
   }
@@ -1262,7 +1262,8 @@ bool section_capture_is_valid(const Section &section) {
       return false;
   }
   for (size_t i = 0; i < expected; i++) {
-    if (section.capture[i].level0 != 0 || section.capture[i].duration0 == 0 || section.capture[i].duration0 >= 80)
+    if (section.capture[i].level0 != 0 || section.capture[i].duration0 == 0 ||
+        section.capture[i].duration0 >= Timing{}.slot_us)
       return false;
   }
   for (size_t i = expected; i < section.capture.size(); i++) {
@@ -1317,7 +1318,7 @@ TEST_P(RmtOneWireFuzz, I5_OkOnlyWithACompleteDecode) {
           break;
         case 5:
           if (!capture.empty())
-            capture[rng() % capture.size()].duration0 = 80 + rng() % 100;
+            capture[rng() % capture.size()].duration0 = Timing{}.slot_us + rng() % 100;
           break;
         case 6:
           if (!capture.empty())
@@ -1400,14 +1401,14 @@ void read_scratchpad_ok(Rig &rig) {
 
 }  // namespace
 
-TEST(RmtOneWireEngine, Timing_DefaultRxIdleIs100) {
+TEST(RmtOneWireEngine, Timing_DefaultRxIdleIs130) {
   Rig rig;
   read_scratchpad_ok(rig);
-  expect_rx_idle(rig.port, 100);
+  expect_rx_idle(rig.port, 130);
 }
 
 TEST(RmtOneWireEngine, Timing_RxIdleIsSlotPlus20WithAFloorOf100) {
-  // Slot 80 keeps I13 unchanged, a floor of 100 only ends at slot 81
+  // The floor of 100 holds up to slot 80 and ends at slot 81
   const struct {
     uint8_t write0_low;
     uint8_t slot;
@@ -1429,7 +1430,7 @@ TEST(RmtOneWireEngine, Timing_ReachesTheWire) {
   int reads = 0;
   for (const auto &section : rig.port.sections) {
     if (section.is_reset()) {
-      EXPECT_EQ(section.tx[0].duration0, 500);
+      EXPECT_EQ(section.tx[0].duration0, 520);
       EXPECT_EQ(section.tx[0].duration1, 500);
       continue;
     }
@@ -1482,7 +1483,7 @@ TEST(RmtOneWireEngine, Timing_ThresholdReachesTheDecoder) {
 }
 
 TEST(RmtOneWireEngine, Timing_SlotLimitReachesTheDecoder) {
-  // Errors_LowTimeLimitIn79Out80 with slot 120
+  // Errors_LowTimeLimitIn109Out110 with slot 120
   const std::vector<uint8_t> ones(9, 0xFF);
   for (size_t patched_section : {size_t{3}, size_t{4}}) {
     for (uint16_t low : {uint16_t{119}, uint16_t{120}}) {

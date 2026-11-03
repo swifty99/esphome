@@ -11,10 +11,10 @@ namespace esphome::gpio::rmt_one_wire::testing {
 
 namespace {
 
-/// Capture of a read slot as an RMT receiver delivers it: Low time, then the rest of 80 us High.
+/// Capture of a read slot as an RMT receiver delivers it: Low time, then the rest of the slot High.
 Symbol read_slot(bool bit, uint16_t zero_low = 30, uint16_t one_low = 7) {
   uint16_t low = bit ? one_low : zero_low;
-  return Symbol{low, 0, static_cast<uint16_t>(80 - low), 1};
+  return Symbol{low, 0, static_cast<uint16_t>(Timing{}.slot_us - low), 1};
 }
 
 /// Capture of a whole read section, the High of the last slot idles out and is stored as 0.
@@ -39,7 +39,7 @@ bool capture_is_valid(const std::vector<Symbol> &capture, size_t expected) {
       return false;
   }
   for (size_t i = 0; i < expected; i++) {
-    if (capture[i].level0 != 0 || capture[i].duration0 == 0 || capture[i].duration0 >= 80)
+    if (capture[i].level0 != 0 || capture[i].duration0 == 0 || capture[i].duration0 >= Timing{}.slot_us)
       return false;
   }
   for (size_t i = expected; i < capture.size(); i++) {
@@ -129,14 +129,14 @@ TEST(RmtOneWireCodec, I12_ExactValuesOfSection43) {
   encode_write_slots(&zeros, 0, 1, &zero);
   encode_read_slots(1, &read);
   const Symbol reset = reset_symbol();
-  EXPECT_EQ(reset.duration0, 500);
+  EXPECT_EQ(reset.duration0, 520);
   EXPECT_EQ(reset.duration1, 500);
   EXPECT_EQ(one.duration0, 6);
-  EXPECT_EQ(one.duration1, 74);
-  EXPECT_EQ(zero.duration0, 65);
-  EXPECT_EQ(zero.duration1, 15);
+  EXPECT_EQ(one.duration1, 104);
+  EXPECT_EQ(zero.duration0, 90);
+  EXPECT_EQ(zero.duration1, 20);
   EXPECT_EQ(read.duration0, 4);
-  EXPECT_EQ(read.duration1, 76);
+  EXPECT_EQ(read.duration1, 106);
 }
 
 // ---- Encoding -------------------------------------------------------------------------------
@@ -319,16 +319,16 @@ TEST(RmtOneWireCodec, I5_CompleteCaptureShapesAreAccepted) {
 }
 
 TEST(RmtOneWireCodec, I5_LowTimeMustBeShorterThanASlot) {
-  // Section 7 point 3, at every position: 79 us is a 0, from 80 us on someone holds the bus
+  // Section 7 point 3, at every position: 109 us is a 0, from 110 us on someone holds the bus
   const std::vector<bool> bits{true, true, true, true};
   for (size_t position = 0; position < bits.size(); position++) {
     auto capture = capture_of(bits);
-    capture[position].duration0 = 79;
+    capture[position].duration0 = 109;
     uint8_t out = 0;
     ASSERT_TRUE(decode_read_slots(capture.data(), capture.size(), bits.size(), &out, 0)) << "position " << position;
     EXPECT_EQ(out, 0x0F & ~(1u << position)) << "position " << position;
 
-    for (uint16_t low : {uint16_t{80}, uint16_t{81}, uint16_t{600}, uint16_t{32767}}) {
+    for (uint16_t low : {uint16_t{110}, uint16_t{111}, uint16_t{600}, uint16_t{32767}}) {
       capture[position].duration0 = low;
       EXPECT_FALSE(decode_read_slots(capture.data(), capture.size(), bits.size(), &out, 0))
           << "position " << position << " low " << low;
@@ -469,10 +469,10 @@ TEST(RmtOneWireCodec, I5_FuzzMutatedCaptures) {
         capture.back().level1 = 0;
         break;
       case 7:  // Low of a whole slot or more
-        capture[rng() % capture.size()].duration0 = 80 + rng() % 200;
+        capture[rng() % capture.size()].duration0 = Timing{}.slot_us + rng() % 200;
         break;
       case 8:  // longest allowed Low
-        capture[rng() % capture.size()].duration0 = 79;
+        capture[rng() % capture.size()].duration0 = Timing{}.slot_us - 1;
         break;
       case 9:  // the last symbol ends on Low, duration1 is whatever was in the memory
         capture.back() = Symbol{0, 0, static_cast<uint16_t>(rng() % 3 == 0 ? 0 : rng() % 32768), 1};
@@ -511,7 +511,7 @@ TEST(RmtOneWireCodec, I5_FuzzRandomGarbage) {
     const size_t expected = 1 + rng() % 62;
     std::vector<Symbol> capture(rng() % 70);
     for (auto &symbol : capture) {
-      const uint32_t low = rng() % 8 == 0 ? rng() % 200 : 1 + rng() % 79;
+      const uint32_t low = rng() % 8 == 0 ? rng() % 200 : 1 + rng() % (Timing{}.slot_us - 1);
       symbol = Symbol{static_cast<uint16_t>(low), static_cast<uint16_t>(rng() % 16 == 0),
                       static_cast<uint16_t>(rng() % 4 == 0 ? 0 : rng() % 200), 1};
     }
@@ -555,13 +555,13 @@ void expect_slot(const Symbol &slot, uint16_t low, uint16_t high) {
 
 TEST(RmtOneWireCodec, Timing_DefaultsAreTheSpecValues) {
   const Timing timing;
-  EXPECT_EQ(timing.write0_low_us, 65);
-  EXPECT_EQ(timing.slot_us, 80);
+  EXPECT_EQ(timing.write0_low_us, 90);
+  EXPECT_EQ(timing.slot_us, 110);
   EXPECT_EQ(timing.read_threshold_us, 13);
 }
 
 TEST(RmtOneWireCodec, Timing_NoArgumentEncodesLikeTheSpecValues) {
-  const Timing spec_values{65, 80, 13};
+  const Timing spec_values{90, 110, 13};
   for (int value = 0; value < 256; value++) {
     const uint8_t byte = static_cast<uint8_t>(value);
     std::array<Symbol, 8> without{};
@@ -580,7 +580,7 @@ TEST(RmtOneWireCodec, Timing_NoArgumentEncodesLikeTheSpecValues) {
 }
 
 TEST(RmtOneWireCodec, Timing_NoArgumentDecodesLikeTheSpecValues) {
-  const Timing spec_values{65, 80, 13};
+  const Timing spec_values{90, 110, 13};
   for (uint16_t low = 1; low < 100; low++) {
     const Symbol capture{low, 0, 0, 1};
     uint8_t without = 0x55;

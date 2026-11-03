@@ -380,7 +380,7 @@ void expect_idle_values(const SimPort &port) {
       EXPECT_EQ(section.idle_us, 600u) << "section " << i;
     } else {
       others++;
-      EXPECT_EQ(section.idle_us, 100u) << "section " << i;
+      EXPECT_EQ(section.idle_us, 130u) << "section " << i;
     }
   }
   EXPECT_GT(resets, 0);

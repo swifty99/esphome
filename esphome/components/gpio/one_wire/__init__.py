@@ -16,8 +16,8 @@ CONF_RMT_TIMING = "rmt_timing"
 
 # Option, with _us also its field in rmt_one_wire::Timing: default, minimum, maximum in us
 RMT_TIMING = {
-    "write0_low": (65, 60, 105),
-    "slot": (80, 71, 120),
+    "write0_low": (90, 60, 105),
+    "slot": (110, 71, 120),
     "read_threshold": (13, 10, 25),
 }
 
