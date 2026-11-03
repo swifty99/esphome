@@ -115,7 +115,8 @@ bool GPIORMTOneWireBus::check_(esp_err_t error, const LogString *step) {
     return true;
   ESP_LOGE(TAG, "RMT driver failed: %s", esp_err_to_name(error));
   this->engine_.set_failed();
-  this->mark_failed(error == ESP_ERR_NOT_FOUND ? LOG_STR("no free RMT channel or symbol memory") : step);
+  const auto *no_memory = LOG_STR("no free RMT channel or symbol memory, lower rmt_symbols of other RMT components");
+  this->mark_failed(error == ESP_ERR_NOT_FOUND ? no_memory : step);
   return false;
 }
 
