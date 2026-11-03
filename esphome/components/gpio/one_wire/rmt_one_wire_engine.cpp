@@ -105,8 +105,7 @@ void Engine::section_done_() {
   if (this->step_ == Step::RESET) {
     status = decode_reset(this->rx_, this->rx_count_);
   } else if (this->step_ == Step::READ &&
-             !decode_read_slots(this->rx_, this->rx_count_, this->read_slots_, transaction->read_data,
-                                this->read_pos_ - this->read_slots_, this->timing_)) {
+             !this->decode_read_(this->read_slots_, transaction->read_data, this->read_pos_ - this->read_slots_)) {
     status = TransactionStatus::CAPTURE_ERROR;
   }
   if (status != TransactionStatus::OK) {
@@ -141,6 +140,20 @@ void Engine::section_done_() {
   }
   if (!this->start_section_(count, idle_us))
     this->finish_(TransactionStatus::HARDWARE_ERROR);
+}
+
+bool Engine::decode_read_(size_t num_bits, uint8_t *out, size_t bit_offset) {
+#if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_VERBOSE
+  uint16_t largest_one = 0;
+  uint16_t smallest_zero = UINT16_MAX;
+  for (size_t i = 0; i < this->rx_count_; i++) {
+    const uint16_t low = this->rx_[i].duration0;
+    largest_one = std::max<uint16_t>(largest_one, low < this->timing_.read_threshold_us ? low : 0);
+    smallest_zero = std::min<uint16_t>(smallest_zero, low < this->timing_.read_threshold_us ? UINT16_MAX : low);
+  }
+  ESP_LOGV(TAG, "Read section: largest 1 Low %u us, smallest 0 Low %u us", largest_one, smallest_zero);
+#endif
+  return decode_read_slots(this->rx_, this->rx_count_, num_bits, out, bit_offset, this->timing_);
 }
 
 void Engine::finish_(TransactionStatus status) {
@@ -227,8 +240,7 @@ bool Engine::read_blocking(uint8_t *data, size_t num_bits) {
   const size_t room = max_rx_slots(this->mem_words_);
   for (size_t decoded = 0; decoded < num_bits;) {
     const size_t count = encode_read_slots(std::min(room, num_bits - decoded), this->tx_, this->timing_);
-    if (!this->run_section_(count, this->rx_idle_us_) ||
-        !decode_read_slots(this->rx_, this->rx_count_, count, data, decoded, this->timing_)) {
+    if (!this->run_section_(count, this->rx_idle_us_) || !this->decode_read_(count, data, decoded)) {
       for (size_t bit = 0; bit < num_bits; bit++)
         data[bit / 8] |= 1u << (bit % 8);
       return false;

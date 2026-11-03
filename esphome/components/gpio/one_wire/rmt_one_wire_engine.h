@@ -62,6 +62,8 @@ class Engine {
 
   void start_reset_();
   void section_done_();
+  /// decode_read_slots() on the capture, shows at VERBOSE how far the bits were from read_threshold.
+  bool decode_read_(size_t num_bits, uint8_t *out, size_t bit_offset);
   void finish_(one_wire::TransactionStatus status);
   /// Sends tx_[0, count), with RX unless idle_us is NO_RX. False: hardware error, nothing is running.
   bool start_section_(size_t count, uint32_t idle_us);
