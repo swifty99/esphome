@@ -92,6 +92,24 @@ void GPIORMTOneWireBus::dump_config() {
   this->dump_devices_(TAG);
 }
 
+void GPIORMTOneWireBus::loop() {
+  // mark_failed() took the bus out of the loop: end all that is queued now. disable_loop() would undo the failed state.
+  do {
+    this->engine_.poll();
+  } while (this->is_failed() && !this->engine_.is_idle());
+  if (this->engine_.is_idle() && !this->is_failed())
+    this->disable_loop();
+}
+
+bool GPIORMTOneWireBus::submit(one_wire::Transaction *transaction) {
+  if (!this->engine_.submit(transaction))
+    return false;
+  this->enable_loop();  // Does nothing on a failed bus, which has to run loop() itself
+  if (this->is_failed())
+    this->loop();
+  return true;
+}
+
 bool GPIORMTOneWireBus::check_(esp_err_t error, const LogString *step) {
   if (error == ESP_OK)
     return true;
@@ -103,13 +121,17 @@ bool GPIORMTOneWireBus::check_(esp_err_t error, const LogString *step) {
 
 bool IRAM_ATTR GPIORMTOneWireBus::tx_done_isr(rmt_channel_handle_t channel, const rmt_tx_done_event_data_t *data,
                                               void *context) {
-  static_cast<GPIORMTOneWireBus *>(context)->engine_.on_tx_done();
+  auto *bus = static_cast<GPIORMTOneWireBus *>(context);
+  if (bus->engine_.on_tx_done())
+    bus->enable_loop_soon_any_context();
   return false;
 }
 
 bool IRAM_ATTR GPIORMTOneWireBus::rx_done_isr(rmt_channel_handle_t channel, const rmt_rx_done_event_data_t *data,
                                               void *context) {
-  static_cast<GPIORMTOneWireBus *>(context)->engine_.on_rx_done(data->num_symbols);
+  auto *bus = static_cast<GPIORMTOneWireBus *>(context);
+  if (bus->engine_.on_rx_done(data->num_symbols))
+    bus->enable_loop_soon_any_context();
   return false;
 }
 

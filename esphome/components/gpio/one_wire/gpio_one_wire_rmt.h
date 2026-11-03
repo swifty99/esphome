@@ -21,6 +21,7 @@ class GPIORMTOneWireBus final : public one_wire::OneWireBus, public Component, p
   explicit GPIORMTOneWireBus(const rmt_one_wire::Timing &timing = {});
 
   void setup() override;
+  void loop() override;
   void dump_config() override;
   float get_setup_priority() const override { return setup_priority::BUS; }
 
@@ -30,6 +31,7 @@ class GPIORMTOneWireBus final : public one_wire::OneWireBus, public Component, p
   void write64(uint64_t val) override { this->engine_.write_blocking(reinterpret_cast<const uint8_t *>(&val), 64); }
   uint8_t read8() override;
   uint64_t read64() override;
+  bool submit(one_wire::Transaction *transaction) override;
 
   bool line_is_high() override { return this->pin_->digital_read(); }
   bool arm_rx(rmt_one_wire::Symbol *buffer, size_t capacity, uint32_t idle_us) override;
