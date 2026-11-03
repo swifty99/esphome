@@ -70,17 +70,8 @@ bool OneWireBus::submit(Transaction *transaction) {
   if (transaction->pending_)
     return false;
   transaction->pending_ = true;
-  const int presence = this->reset_int();
-  const TransactionStatus status = presence == 1   ? TransactionStatus::OK
-                                   : presence == 0 ? TransactionStatus::NO_PRESENCE
-                                                   : TransactionStatus::BUS_LOW;
-  if (status == TransactionStatus::OK) {
-    if (transaction->address == 0) {
-      this->write8(0xCC);  // skip ROM
-    } else {
-      this->write8(ONE_WIRE_ROM_SELECT);
-      this->write64(transaction->address);
-    }
+  const bool present = transaction->address == 0 ? this->skip() : this->select(transaction->address);
+  if (present) {
     for (uint8_t i = 0; i < transaction->write_len; i++)
       this->write8(transaction->write_data[i]);
     for (uint8_t i = 0; i < transaction->read_len; i++)
@@ -88,7 +79,7 @@ bool OneWireBus::submit(Transaction *transaction) {
   }
   transaction->pending_ = false;
   if (transaction->on_done != nullptr)
-    transaction->on_done(transaction->context, status);
+    transaction->on_done(transaction->context, present ? TransactionStatus::OK : TransactionStatus::NO_PRESENCE);
   return true;
 }
 #endif  // USE_ONE_WIRE_RMT
