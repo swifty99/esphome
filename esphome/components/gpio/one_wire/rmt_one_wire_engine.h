@@ -55,7 +55,7 @@ class Engine {
 
  protected:
   /// Where the transaction at the head of the FIFO stands.
-  enum class Step : uint8_t { LINE_UNCHECKED, LINE_LOW, RESET, WRITE, READ };
+  enum class Step : uint8_t { LINE_UNCHECKED, RESET, WRITE, READ };
 
   static constexpr uint32_t PENDING_TX = 1;
   static constexpr uint32_t PENDING_RX = 2;
@@ -83,7 +83,7 @@ class Engine {
   one_wire::Transaction *tail_{nullptr};
 
   Step step_{Step::LINE_UNCHECKED};
-  uint32_t since_ms_{0};  ///< Start of the running section, or when the line was first seen Low
+  uint32_t since_ms_{0};  ///< Start of the running section
   uint8_t rom_selection_[9]{};
   size_t rom_bits_{0};
   size_t write_pos_{0};   ///< Slots sent of ROM selection + write_data

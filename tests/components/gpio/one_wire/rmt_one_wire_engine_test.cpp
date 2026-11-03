@@ -263,42 +263,13 @@ TEST(RmtOneWireEngine, Rule4_NullOnDoneOnEveryErrorEnd) {
 
 // ---- PRECHECK --------------------------------------------------------------------------------
 
-TEST(RmtOneWireEngine, Precheck_LineLowOverSeveralPollsThenStarts) {
-  Rig rig;
-  add_scratchpad_device(rig);
-  rig.port.line_low_until_us = 1500;
-  DoneLog log;
-  Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
-  ASSERT_TRUE(rig.engine.submit(&job.t));
-  for (int i = 0; i < 6; i++) {  // up to 1250 us in steps of 250 us
-    rig.engine.poll();
-    EXPECT_TRUE(rig.port.sections.empty()) << "started on a low line at " << rig.port.now_us();
-    EXPECT_EQ(rig.port.arm_count, 0);
-    EXPECT_TRUE(log.empty());
-    EXPECT_TRUE(rig.port.loop_active()) << "PRECHECK needs further poll() calls";
-    rig.port.advance_us(250);
-  }
-  rig.port.advance_us(250);  // 1750 us: line is High again
-  rig.pump();
-  EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::OK}}));
-  EXPECT_EQ(job.read_bytes, PAYLOAD);
-}
-
-TEST(RmtOneWireEngine, Precheck_BusLowAfter2ms) {
+TEST(RmtOneWireEngine, Precheck_LineLowAtTheStartIsBusLowAtOnce) {
   Rig rig;
   add_scratchpad_device(rig);
   rig.port.line_low_until_us = 1000000;
   DoneLog log;
   Job job(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
   ASSERT_TRUE(rig.engine.submit(&job.t));
-  rig.engine.poll();
-  rig.port.advance_us(500);
-  rig.engine.poll();
-  rig.port.advance_us(1000);  // 1500 us: not yet
-  rig.engine.poll();
-  EXPECT_TRUE(log.empty());
-  EXPECT_FALSE(rig.engine.is_idle());
-  rig.port.advance_us(1500);  // 3000 us: past the limit
   rig.engine.poll();
   EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::BUS_LOW}}));
   EXPECT_EQ(rig.port.tx_count, 0);
@@ -308,25 +279,22 @@ TEST(RmtOneWireEngine, Precheck_BusLowAfter2ms) {
   EXPECT_FALSE(rig.port.loop_active());
 }
 
-TEST(RmtOneWireEngine, Precheck_EveryTransactionGetsItsOwn2ms) {
+TEST(RmtOneWireEngine, Precheck_NextTransactionRunsOnceTheLineIsBack) {
   Rig rig;
   add_scratchpad_device(rig);
-  rig.port.line_low_until_us = 4500;
+  rig.port.line_low_until_us = 1000;
   DoneLog log;
   Job first(&log, 1, ROM_A, {READ_SCRATCHPAD}, 9);
   Job second(&log, 2, ROM_A, {READ_SCRATCHPAD}, 9);
   ASSERT_TRUE(rig.engine.submit(&first.t));
   ASSERT_TRUE(rig.engine.submit(&second.t));
-  for (int i = 0; i < 12; i++) {  // 3000 us
-    rig.engine.poll();
-    rig.port.advance_us(250);
-  }
+  rig.engine.poll();
   EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::BUS_LOW}}));
-  // The second one started checking when the first ended, it survives until the line is back
   EXPECT_TRUE(rig.port.sections.empty());
   rig.port.advance_us(2000);
   rig.pump();
   EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::BUS_LOW}, {2, TransactionStatus::OK}}));
+  EXPECT_EQ(second.read_bytes, PAYLOAD);
 }
 
 // ---- Heap ------------------------------------------------------------------------------------
@@ -800,22 +768,6 @@ TEST(RmtOneWireEngine, I9_TimeoutWorksAcrossTheClockWrap) {
   rig.port.advance_us(10 * MS);
   rig.engine.poll();
   EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::TIMEOUT}}));
-}
-
-TEST(RmtOneWireEngine, Precheck_BusLowWorksAcrossTheClockWrap) {
-  Rig rig;
-  rig.port.set_time_base_ms(0xFFFFFFFFu);
-  rig.port.line_low_until_us = 1000000;
-  DoneLog log;
-  Job job(&log, 1, 0, {}, 0);
-  ASSERT_TRUE(rig.engine.submit(&job.t));
-  rig.engine.poll();
-  rig.port.advance_us(1500);
-  rig.engine.poll();
-  EXPECT_TRUE(log.empty());
-  rig.port.advance_us(1500);
-  rig.engine.poll();
-  EXPECT_EQ(log, (DoneLog{{1, TransactionStatus::BUS_LOW}}));
 }
 
 namespace {

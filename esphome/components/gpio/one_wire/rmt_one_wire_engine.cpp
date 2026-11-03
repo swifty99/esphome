@@ -19,7 +19,6 @@ static constexpr uint8_t CMD_MATCH_ROM = 0x55;
 
 static constexpr uint32_t NO_RX = 0;
 static constexpr uint32_t RX_IDLE_RESET_US = 600;  // above the reset Low, or the capture ends inside the pulse
-static constexpr uint32_t LINE_LOW_LIMIT_MS = 2;
 static constexpr uint32_t SECTION_TIMEOUT_MS = 50;
 static constexpr uint32_t BLOCKING_WAIT_MS = 1;
 
@@ -52,13 +51,10 @@ void Engine::poll() {
   }
   switch (this->step_) {
     case Step::LINE_UNCHECKED:
-    case Step::LINE_LOW:
+      // RX sees no edge on a line that is already Low, so this would end as a timeout much later
       if (this->port_->line_is_high()) {
         this->start_reset_();
-      } else if (this->step_ == Step::LINE_UNCHECKED) {
-        this->step_ = Step::LINE_LOW;
-        this->since_ms_ = this->port_->now_ms();
-      } else if (this->port_->now_ms() - this->since_ms_ >= LINE_LOW_LIMIT_MS) {
+      } else {
         this->finish_(TransactionStatus::BUS_LOW);
       }
       break;
