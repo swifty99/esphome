@@ -2,12 +2,18 @@
 
 from collections.abc import Callable
 from pathlib import Path
+import re
 
 import pytest
 
 from esphome import yaml_util
 from esphome.components.esp32 import get_excluded_builtin_components
-from esphome.components.gpio.one_wire import GPIOOneWireBus, GPIORMTOneWireBus
+from esphome.components.gpio import one_wire as gpio_one_wire
+from esphome.components.gpio.one_wire import (
+    RMT_TIMING,
+    GPIOOneWireBus,
+    GPIORMTOneWireBus,
+)
 from esphome.config import Config, validate_config
 from esphome.core import CORE
 
@@ -204,6 +210,26 @@ def test_rmt_timing_keeps_recovery_after_a_written_0(
 ) -> None:
     result = validate(_yaml(ESP32_S3_IDF, USE_RMT + _timing(**values)))
     assert not result.errors if valid else "write0_low + 11us" in _error_text(result)
+
+
+def test_rmt_timing_error_names_the_effective_values(
+    validate: Callable[[str], Config],
+) -> None:
+    """Only write0_low is set here, but the default of slot is what makes it invalid."""
+    result = validate(_yaml(ESP32_S3_IDF, USE_RMT + _timing(write0_low="80us")))
+
+    assert "got slot 80us and write0_low 80us" in _error_text(result)
+    assert result.errors[0].path[-1] == "slot"
+
+
+def test_rmt_timing_defaults_match_the_codec() -> None:
+    """Otherwise rmt_timing: {} and no rmt_timing at all would drive the bus differently."""
+    codec = Path(gpio_one_wire.__file__).with_name("rmt_one_wire_codec.h").read_text()
+
+    for option, (default, _, _) in RMT_TIMING.items():
+        match = re.search(rf"uint8_t {option}_us\{{(\d+)\}};", codec)
+        assert match, f"{option}_us is not a field of Timing"
+        assert int(match.group(1)) == default, option
 
 
 @pytest.mark.parametrize("bus", ["", "    use_rmt: false\n"])
