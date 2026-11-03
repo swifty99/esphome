@@ -55,7 +55,7 @@ void DallasTemperatureSensor::update() {
 }
 
 // Any status: the conversion only starts here, and the read reports what is wrong with the bus
-void DallasTemperatureSensor::on_convert_done_(void *context, one_wire::TransactionStatus status) {
+void DallasTemperatureSensor::on_convert_done(void *context, one_wire::TransactionStatus status) {
   auto *self = static_cast<DallasTemperatureSensor *>(context);
   self->set_timeout(CONVERSION_TIMEOUT_ID, self->millis_to_wait_for_conversion_(), [self] {
     if (!self->bus_->submit(&self->read_)) {
@@ -64,7 +64,7 @@ void DallasTemperatureSensor::on_convert_done_(void *context, one_wire::Transact
   });
 }
 
-void DallasTemperatureSensor::on_read_done_(void *context, one_wire::TransactionStatus status) {
+void DallasTemperatureSensor::on_read_done(void *context, one_wire::TransactionStatus status) {
   auto *self = static_cast<DallasTemperatureSensor *>(context);
   float tempc = NAN;
   if (status == one_wire::TransactionStatus::NO_PRESENCE || status == one_wire::TransactionStatus::BUS_LOW) {
