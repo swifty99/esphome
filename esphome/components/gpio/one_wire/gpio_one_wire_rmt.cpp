@@ -101,6 +101,11 @@ void GPIORMTOneWireBus::loop() {
     this->disable_loop();
 }
 
+void GPIORMTOneWireBus::on_shutdown() {
+  // After a restart the pin stays on the RMT output and the line is Low until setup() sends the first High symbol
+  gpio_set_direction(static_cast<gpio_num_t>(this->pin_->get_pin()), GPIO_MODE_INPUT);
+}
+
 bool GPIORMTOneWireBus::submit(one_wire::Transaction *transaction) {
   if (!this->engine_.submit(transaction))
     return false;

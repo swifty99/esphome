@@ -22,6 +22,7 @@ class GPIORMTOneWireBus final : public one_wire::OneWireBus, public Component, p
 
   void setup() override;
   void loop() override;
+  void on_shutdown() override;
   void dump_config() override;
   // After LED strips, whose default takes all TX memory: this option must not push out a running strip
   float get_setup_priority() const override { return setup_priority::HARDWARE - 1.0f; }
