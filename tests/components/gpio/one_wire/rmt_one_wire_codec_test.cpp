@@ -205,7 +205,7 @@ INSTANTIATE_TEST_SUITE_P(
             "GlitchThenTooLate", {{503, 0, 250, 1}, {5, 0, 100, 1}, {60, 0, 0, 1}}, TransactionStatus::NO_PRESENCE},
         ResetCase{"NoDevice", {{503, 0, 0, 1}}, TransactionStatus::NO_PRESENCE},
         ResetCase{"LongestOwnPulseIsNoHang", {{599, 0, 0, 1}}, TransactionStatus::NO_PRESENCE},
-        ResetCase{"FirstLowAtHangLimit", {{600, 0, 0, 1}}, TransactionStatus::BUS_LOW},
+        ResetCase{"FirstLowAtHangLimit", {{600, 0, 0, 1}}, TransactionStatus::NO_PRESENCE},
         ResetCase{"HeldLowUntilIdle", {{600, 0, 0, 0}}, TransactionStatus::BUS_LOW},
         ResetCase{"HeldLowLongNumbers", {{32767, 0, 0, 0}}, TransactionStatus::BUS_LOW},
         ResetCase{"EndsOnLowAfterLongPulse", {{503, 0, 27, 1}, {600, 0, 0, 0}}, TransactionStatus::BUS_LOW},

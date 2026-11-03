@@ -16,7 +16,6 @@ static constexpr uint8_t READ_LOW_US = 4;       // tRL 2.5-5
 // Accepted when receiving a reset, in us
 static constexpr uint16_t PRESENCE_MIN_LOW_US = 15;
 static constexpr uint32_t PRESENCE_LATEST_START_US = 300;  // after the release: tPDH(max) + tPDL(max)
-static constexpr uint16_t BUS_HANG_LOW_US = 600;           // first Low, longer than any reset we send
 
 /// The classes of a received symbol. L's duration1 is stale memory and must never be read.
 enum class SymbolClass : uint8_t {
@@ -70,9 +69,6 @@ TransactionStatus decode_reset(const Symbol *capture, size_t count) {
     if (classify(capture[i]) != SymbolClass::END_MARKER)
       return TransactionStatus::CAPTURE_ERROR;
   }
-
-  if (capture[0].duration0 >= BUS_HANG_LOW_US)
-    return TransactionStatus::BUS_LOW;
 
   uint32_t since_release = capture[0].duration1;
   for (size_t i = 1; i < times && since_release <= PRESENCE_LATEST_START_US; i++) {
