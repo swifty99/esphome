@@ -497,9 +497,9 @@
 #define USE_ESP32_MIN_CHIP_REVISION_SET
 #define USE_ESP32_RTC_PREFERENCES
 #define USE_ESP32_SRAM1_AS_IRAM
-#define USE_ONE_WIRE_RMT
 #define USE_ESPNOW
 #define USE_ESPNOW_MAX_PAYLOAD_SIZE 1470
+#define USE_ONE_WIRE_RMT
 
 #ifndef USE_HOST  // web_server, captive_portal: no ESPAsyncWebServer on host
 #define USE_CAPTIVE_PORTAL
