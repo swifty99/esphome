@@ -217,9 +217,8 @@ int Engine::reset_blocking() {
   if (!this->run_section_(1, RX_IDLE_RESET_US))
     return -1;
   const TransactionStatus status = decode_reset(this->rx_, this->rx_count_);
-  if (status == TransactionStatus::CAPTURE_ERROR) {
+  if (status == TransactionStatus::CAPTURE_ERROR)
     ESP_LOGW(TAG, "Reset capture is invalid");
-  }
   return status == TransactionStatus::OK ? 1 : (status == TransactionStatus::NO_PRESENCE ? 0 : -1);
 }
 

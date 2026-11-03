@@ -27,13 +27,11 @@ Timing = gpio_ns.namespace("rmt_one_wire").struct("Timing")
 
 
 def _validate_rmt_timing(timing: ConfigType) -> ConfigType:
-    write0_low = timing["write0_low"].total_microseconds
-    slot = timing["slot"].total_microseconds
+    write0_low, slot = timing["write0_low"], timing["slot"]
     # Rise time budget of 9 us and 2 us of recovery
-    if write0_low + 11 > slot:
+    if write0_low.total_microseconds + 11 > slot.total_microseconds:
         raise cv.Invalid(
-            f"slot must be at least write0_low + 11us, got slot {slot}us and write0_low {write0_low}us",
-            path=["slot"],
+            f"slot {slot} needs at least write0_low {write0_low} + 11us", path=["slot"]
         )
     return timing
 

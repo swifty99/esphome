@@ -209,7 +209,7 @@ def test_rmt_timing_keeps_recovery_after_a_written_0(
     validate: Callable[[str], Config], values: dict[str, str], valid: bool
 ) -> None:
     result = validate(_yaml(ESP32_S3_IDF, USE_RMT + _timing(**values)))
-    assert not result.errors if valid else "write0_low + 11us" in _error_text(result)
+    assert not result.errors if valid else "+ 11us" in _error_text(result)
 
 
 def test_rmt_timing_error_names_the_effective_values(
@@ -218,7 +218,7 @@ def test_rmt_timing_error_names_the_effective_values(
     """Only write0_low is set here, but the default of slot is what makes it invalid."""
     result = validate(_yaml(ESP32_S3_IDF, USE_RMT + _timing(write0_low="80us")))
 
-    assert "got slot 80us and write0_low 80us" in _error_text(result)
+    assert "slot 80us needs at least write0_low 80us + 11us" in _error_text(result)
     assert result.errors[0].path[-1] == "slot"
 
 
