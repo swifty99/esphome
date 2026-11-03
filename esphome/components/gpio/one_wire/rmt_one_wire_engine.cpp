@@ -5,8 +5,11 @@
 #include <algorithm>
 
 #include "esphome/core/hal.h"
+#include "esphome/core/log.h"
 
 namespace esphome::gpio::rmt_one_wire {
+
+ESPHOME_LOG_TAG(TAG, "gpio.one_wire");
 
 using one_wire::Transaction;
 using one_wire::TransactionStatus;
@@ -171,6 +174,7 @@ bool Engine::start_section_(size_t count, uint32_t idle_us) {
 }
 
 bool Engine::abort_section_() {
+  ESP_LOGW(TAG, "RMT section did not finish, aborting it");
   this->pending_ = 0;  // Discards whatever the aborted section still reports
   if (!this->port_->abort())
     this->failed_ = true;
@@ -204,6 +208,9 @@ int Engine::reset_blocking() {
   if (!this->run_section_(1, RX_IDLE_RESET_US))
     return -1;
   const TransactionStatus status = decode_reset(this->rx_, this->rx_count_);
+  if (status == TransactionStatus::CAPTURE_ERROR) {
+    ESP_LOGW(TAG, "Reset capture is invalid");
+  }
   return status == TransactionStatus::OK ? 1 : (status == TransactionStatus::NO_PRESENCE ? 0 : -1);
 }
 
@@ -255,8 +262,10 @@ uint64_t Engine::search_next() {
     count += encode_read_slots(2, this->tx_ + count, this->timing_);
     uint8_t slots = 0;
     if (!this->run_section_(count, this->rx_idle_us_) ||
-        !decode_read_slots(this->rx_, this->rx_count_, count, &slots, 0, this->timing_))
+        !decode_read_slots(this->rx_, this->rx_count_, count, &slots, 0, this->timing_)) {
+      ESP_LOGW(TAG, "Search stopped at bit %u", position);
       return 0;
+    }
     const bool bit = (slots >> (count - 2)) & 1;
     const bool complement = (slots >> (count - 1)) & 1;
     if (bit && complement)

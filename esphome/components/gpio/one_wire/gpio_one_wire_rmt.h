@@ -39,7 +39,8 @@ class GPIORMTOneWireBus final : public one_wire::OneWireBus, public Component, p
   void wait_for_event(uint32_t max_ms) override;
 
  protected:
-  int reset_int() override { return this->engine_.reset_blocking(); }
+  // Not -1, which reads as "bus held low": mark_failed() already named the cause
+  int reset_int() override { return this->is_failed() ? 0 : this->engine_.reset_blocking(); }
   void reset_search() override { this->engine_.reset_search(); }
   uint64_t search_int() override { return this->engine_.search_next(); }
 
